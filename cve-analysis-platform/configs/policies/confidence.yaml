@@ -1,0 +1,11 @@
+# Confidence policy — all three scores must clear `auto_proceed_min` for any
+# automated routing decision. Otherwise the verdict is forced to `needs_human`.
+auto_proceed_min: 0.75
+
+# Minimum number of independent evidence items required to support a
+# `not_applicable` verdict. Below this the verdict is forced to `needs_human`.
+not_applicable_min_evidence: 2
+
+# Verifier disagreement: when the verifier returns `fail` or `uncertain` for a
+# `code_change` verdict, drop fix_confidence by this amount before scoring.
+verifier_disagreement_penalty: 0.4
