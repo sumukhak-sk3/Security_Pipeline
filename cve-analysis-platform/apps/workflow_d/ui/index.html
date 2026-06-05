@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CVE Analysis — Workflow D</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg:#0e1116; --panel:#161b22; --border:#2a3038; --fg:#e6edf3;
+    --muted:#8b949e; --accent:#58a6ff; --ok:#3fb950; --warn:#d29922;
+    --bad:#f85149; --soft:#1f6feb33;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; background:var(--bg); color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;
+    font-size:13px; line-height:1.4; }
+  header { padding:12px 18px; border-bottom:1px solid var(--border);
+    display:flex; align-items:center; gap:12px; }
+  header h1 { font-size:14px; margin:0; font-weight:600; letter-spacing:.3px; }
+  header .pill { background:var(--soft); color:var(--accent);
+    padding:2px 8px; border-radius:10px; font-size:11px; }
+  main { display:grid; grid-template-columns: 340px 1fr; gap:0;
+    height: calc(100vh - 47px); }
+  .col { overflow:auto; padding:14px 16px; }
+  .col + .col { border-left:1px solid var(--border); }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.8px;
+    color:var(--muted); margin:0 0 8px; }
+  .card { background:var(--panel); border:1px solid var(--border);
+    border-radius:6px; padding:10px 12px; margin-bottom:8px; cursor:pointer; }
+  .card:hover { border-color:var(--accent); }
+  .card.active { border-color:var(--accent); background:#1c2530; }
+  .card .row1 { display:flex; justify-content:space-between;
+    align-items:baseline; gap:8px; }
+  .card .rid { font-family:ui-monospace,Menlo,monospace; font-size:11px;
+    color:var(--muted); }
+  .card .when { color:var(--muted); font-size:11px; }
+  .card .state { font-size:11px; padding:1px 7px; border-radius:8px; }
+  .state.running { background:#1f6feb33; color:var(--accent); }
+  .state.ok      { background:#23863633; color:var(--ok); }
+  .state.failed  { background:#da363633; color:var(--bad); }
+  .progress { height:6px; background:#0d1117; border-radius:3px;
+    overflow:hidden; margin-top:6px; }
+  .progress > div { height:100%; background:var(--accent); transition:width .3s; }
+  .tally { display:flex; gap:8px; margin-top:6px; flex-wrap:wrap;
+    font-family:ui-monospace,Menlo,monospace; font-size:11px;
+    color:var(--muted); }
+  .tally span b { color:var(--fg); }
+  .form { background:var(--panel); border:1px solid var(--border);
+    border-radius:6px; padding:12px; margin-bottom:14px; }
+  .form label { display:block; margin:6px 0 2px; color:var(--muted);
+    font-size:11px; }
+  .form input, .form select { width:100%; padding:6px 8px;
+    background:#0d1117; border:1px solid var(--border); color:var(--fg);
+    border-radius:4px; font-size:12px; }
+  .form button { margin-top:10px; padding:7px 12px; background:var(--accent);
+    color:#0d1117; border:0; border-radius:4px; font-weight:600;
+    font-size:12px; cursor:pointer; width:100%; }
+  .form button:disabled { opacity:.5; cursor:not-allowed; }
+  table { width:100%; border-collapse:collapse; font-size:12px;
+    font-family:ui-monospace,Menlo,monospace; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--border);
+    vertical-align:top; }
+  th { color:var(--muted); font-weight:500; font-size:11px;
+    text-transform:uppercase; letter-spacing:.5px; position:sticky; top:0;
+    background:var(--bg); }
+  tr.clickable { cursor:pointer; }
+  tr.clickable:hover { background:#161b22; }
+  .verdict { padding:1px 6px; border-radius:3px; font-size:11px; }
+  .verdict.code_change      { background:#1f6feb33; color:var(--accent); }
+  .verdict.package_upgrade  { background:#23863633; color:var(--ok); }
+  .verdict.not_applicable   { background:#6e768133; color:var(--muted); }
+  .verdict.needs_human      { background:#d2992233; color:var(--warn); }
+  .timeline { font-family:ui-monospace,Menlo,monospace; font-size:11px;
+    background:#0a0d11; border:1px solid var(--border); border-radius:4px;
+    padding:8px; max-height:260px; overflow:auto; }
+  .timeline .ev { padding:2px 0; }
+  .timeline .ev.cve_completed { color:var(--ok); }
+  .timeline .ev.cve_failed,
+  .timeline .ev.run_failed    { color:var(--bad); }
+  .timeline .ev.cve_started   { color:var(--accent); }
+  .timeline .ts { color:var(--muted); margin-right:8px; }
+  details { background:var(--panel); border:1px solid var(--border);
+    border-radius:6px; padding:8px 12px; margin-bottom:8px; }
+  summary { cursor:pointer; font-weight:600; }
+  pre { background:#0a0d11; padding:8px; border-radius:4px; overflow:auto;
+    font-size:11px; color:var(--fg); border:1px solid var(--border); }
+  .muted { color:var(--muted); }
+  .grid { display:grid; grid-template-columns:repeat(4, 1fr); gap:8px;
+    margin:8px 0 14px; }
+  .stat { background:var(--panel); border:1px solid var(--border);
+    border-radius:6px; padding:10px 12px; }
+  .stat .v { font-size:20px; font-weight:600; }
+  .stat .l { font-size:11px; color:var(--muted); text-transform:uppercase;
+    letter-spacing:.5px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>CVE Analysis Platform</h1>
+  <span class="pill" id="health-pill">connecting…</span>
+  <span class="muted" id="conn-info"></span>
+</header>
+
+<main>
+  <!-- ============= LEFT: runs list + new-run form ============= -->
+  <section class="col">
+    <h2>New run</h2>
+    <form class="form" id="new-run-form">
+      <label>Vulns path (server-side absolute path)</label>
+      <input name="vulns_path" placeholder="/abs/path/sbom.csv" required>
+      <label>Severities (comma-separated)</label>
+      <input name="severities" value="CRITICAL,HIGH">
+      <label>Limit (0 = no limit)</label>
+      <input name="limit" type="number" value="20" min="0">
+      <label>Workers</label>
+      <input name="workers" type="number" value="4" min="1" max="32">
+      <label>Mode</label>
+      <select name="mode">
+        <option value="standard" selected>standard</option>
+        <option value="urgent">urgent</option>
+        <option value="ad_hoc">ad_hoc</option>
+      </select>
+      <button type="submit" id="start-btn">Start run</button>
+    </form>
+
+    <h2>Recent runs</h2>
+    <div id="runs-list"></div>
+  </section>
+
+  <!-- ============= RIGHT: detail of selected run ============= -->
+  <section class="col">
+    <div id="detail">
+      <p class="muted">Select a run, or start a new one.</p>
+    </div>
+  </section>
+</main>
+
+<script>
+'use strict';
+
+const API = ''; // same-origin
+let selectedRunId = null;
+let ws = null;
+let liveTotal = 0, liveDone = 0;
+const liveTally = { code_change:0, package_upgrade:0, not_applicable:0, needs_human:0 };
+const liveCVEs = []; // ordered list of completed CVE events for the current run
+
+function $(sel) { return document.querySelector(sel); }
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function fmtTs(t) {
+  if (!t) return '—';
+  const d = new Date(t * 1000);
+  return d.toLocaleString();
+}
+function fmtAge(t) {
+  if (!t) return '';
+  const s = Math.max(0, (Date.now()/1000) - t);
+  if (s < 60) return Math.floor(s) + 's ago';
+  if (s < 3600) return Math.floor(s/60) + 'm ago';
+  if (s < 86400) return Math.floor(s/3600) + 'h ago';
+  return Math.floor(s/86400) + 'd ago';
+}
+
+// -------- health -------------------------------------------------------
+async function pingHealth() {
+  try {
+    const r = await fetch(API + '/health');
+    if (!r.ok) throw new Error();
+    const d = await r.json();
+    $('#health-pill').textContent = 'online';
+    $('#health-pill').style.background = '#23863633';
+    $('#health-pill').style.color = '#3fb950';
+    $('#conn-info').textContent =
+      `author=${d.author_model || '?'}  verifier=${d.verifier_model || '?'}` +
+      `  index=${d.index_present ? 'present' : 'missing'}`;
+  } catch (e) {
+    $('#health-pill').textContent = 'offline';
+    $('#health-pill').style.background = '#da363633';
+    $('#health-pill').style.color = '#f85149';
+  }
+}
+
+// -------- runs list ----------------------------------------------------
+async function refreshRuns() {
+  let runs = [];
+  try {
+    const r = await fetch(API + '/runs');
+    runs = (await r.json()).runs || [];
+  } catch (e) { return; }
+  const html = runs.slice(0, 40).map(r => `
+    <div class="card${r.run_id === selectedRunId ? ' active' : ''}"
+         data-run="${esc(r.run_id)}">
+      <div class="row1">
+        <span class="rid">${esc(r.run_id)}</span>
+        <span class="state ${esc(r.state || 'ok')}">${esc(r.state || 'ok')}</span>
+      </div>
+      <div class="when">${fmtAge(r.mtime)} · ${esc(fmtTs(r.mtime))}</div>
+    </div>`).join('');
+  $('#runs-list').innerHTML = html || '<p class="muted">No runs yet.</p>';
+  $('#runs-list').querySelectorAll('.card').forEach(el => {
+    el.addEventListener('click',
+      () => selectRun(el.getAttribute('data-run')));
+  });
+}
+
+// -------- detail pane --------------------------------------------------
+async function selectRun(runId) {
+  selectedRunId = runId;
+  if (ws) { try { ws.close(); } catch {} ws = null; }
+  liveTotal = 0; liveDone = 0;
+  for (const k in liveTally) liveTally[k] = 0;
+  liveCVEs.length = 0;
+  refreshRuns();
+  await renderDetail();
+  openStream(runId);
+}
+
+function tallyBar() {
+  const pct = liveTotal ? Math.floor(100 * liveDone / liveTotal) : 0;
+  return `
+    <div class="grid">
+      <div class="stat"><div class="v">${liveDone}/${liveTotal || '?'}</div>
+        <div class="l">progress (${pct}%)</div></div>
+      <div class="stat"><div class="v" style="color:#3fb950">
+        ${liveTally.package_upgrade}</div>
+        <div class="l">package_upgrade</div></div>
+      <div class="stat"><div class="v" style="color:#58a6ff">
+        ${liveTally.code_change}</div>
+        <div class="l">code_change</div></div>
+      <div class="stat"><div class="v" style="color:#d29922">
+        ${liveTally.needs_human}</div>
+        <div class="l">needs_human</div></div>
+    </div>
+    <div class="progress"><div style="width:${pct}%"></div></div>`;
+}
+
+async function renderDetail() {
+  const rid = selectedRunId;
+  if (!rid) return;
+  let cves = [];
+  try {
+    const r = await fetch(`${API}/runs/${rid}/cves`);
+    cves = (await r.json()).cves || [];
+  } catch {}
+  const liveRows = liveCVEs.map(c => `
+    <tr class="clickable" data-cve="${esc(c.cve_id)}">
+      <td>${esc(c.cve_id)}</td>
+      <td>${esc(c.component || '')} ${esc(c.version || '')}</td>
+      <td><span class="verdict ${esc(c.final_verdict)}">${esc(c.final_verdict)}</span></td>
+      <td>${esc(c.decision || '')}</td>
+      <td>${c.duration_ms ? (c.duration_ms/1000).toFixed(1) + 's' : ''}</td>
+    </tr>`).join('');
+  const persistedRows = cves.map(c => `
+    <tr class="clickable" data-cve="${esc(c.cve_id)}">
+      <td>${esc(c.cve_id)}</td>
+      <td>${esc(c.component || '')} ${esc(c.version || '')}</td>
+      <td><span class="verdict ${esc(c.verdict)}">${esc(c.verdict)}</span></td>
+      <td>${esc(c.decision || '')}</td>
+      <td>${c.has_patch ? '✓ patch' : ''}</td>
+    </tr>`).join('');
+  const useLive = liveRows.length && (!cves.length || liveTotal > cves.length);
+  $('#detail').innerHTML = `
+    <h2>Run ${esc(rid)}</h2>
+    ${tallyBar()}
+    <h2>Per-CVE</h2>
+    <table>
+      <thead><tr><th>CVE</th><th>Component</th><th>Verdict</th>
+        <th>Decision</th><th>${useLive ? 'Duration' : 'Patch'}</th></tr></thead>
+      <tbody id="cve-rows">${useLive ? liveRows : persistedRows}</tbody>
+    </table>
+    <h2 style="margin-top:14px">Event timeline</h2>
+    <div class="timeline" id="timeline"></div>`;
+  $('#detail').querySelectorAll('tr.clickable').forEach(tr => {
+    tr.addEventListener('click',
+      () => showCveDetail(rid, tr.getAttribute('data-cve')));
+  });
+}
+
+async function showCveDetail(runId, cveId) {
+  try {
+    const r = await fetch(`${API}/runs/${runId}/cves/${cveId}`);
+    if (!r.ok) return;
+    const d = await r.json();
+    const win = window.open('', '_blank', 'width=900,height=700');
+    win.document.write(`<pre style="font-size:11px;font-family:ui-monospace,Menlo,monospace;`+
+      `background:#0e1116;color:#e6edf3;padding:14px;margin:0;`+
+      `white-space:pre-wrap;word-break:break-word;">`+
+      esc(JSON.stringify(d, null, 2)) + `</pre>`);
+  } catch {}
+}
+
+// -------- live event stream -------------------------------------------
+function openStream(runId) {
+  const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+  const url = `${scheme}://${location.host}/runs/${runId}/stream`;
+  ws = new WebSocket(url);
+  ws.onmessage = (m) => {
+    let ev; try { ev = JSON.parse(m.data); } catch { return; }
+    handleEvent(ev);
+  };
+  ws.onerror = () => {};
+  ws.onclose = () => {};
+}
+
+function handleEvent(ev) {
+  const tl = document.getElementById('timeline');
+  if (tl) {
+    const cls = (ev.event || '').replace('.', '_');
+    const ts = new Date((ev.ts || 0) * 1000).toLocaleTimeString();
+    const d = ev.data || {};
+    const tail = [
+      d.cve_id, d.component, d.version,
+      d.final_verdict, d.decision,
+      (d.duration_ms ? (d.duration_ms/1000).toFixed(1) + 's' : '')
+    ].filter(Boolean).join(' ');
+    const line = document.createElement('div');
+    line.className = 'ev ' + cls;
+    line.innerHTML = `<span class="ts">${esc(ts)}</span>` +
+      `<b>${esc(ev.event)}</b>  ${esc(tail)}`;
+    tl.appendChild(line);
+    tl.scrollTop = tl.scrollHeight;
+  }
+  if (ev.event === 'cve.queued') {
+    const total = (ev.data || {}).total;
+    if (total) liveTotal = total;
+  } else if (ev.event === 'cve.completed') {
+    liveDone += 1;
+    const v = (ev.data || {}).final_verdict;
+    if (v && liveTally.hasOwnProperty(v)) liveTally[v] += 1;
+    liveCVEs.push(ev.data || {});
+  } else if (ev.event === 'cve.failed') {
+    liveDone += 1;
+    liveTally.needs_human += 1;
+    liveCVEs.push(Object.assign({}, ev.data || {}, {final_verdict:'needs_human'}));
+  } else if (ev.event === 'run.completed' || ev.event === 'run.failed') {
+    setTimeout(() => { refreshRuns(); renderDetail(); }, 400);
+  }
+  // Cheap re-render: only the tally block + table, not the timeline
+  const stats = document.querySelector('.grid');
+  if (stats) {
+    const wrap = document.createElement('div');
+    wrap.innerHTML = tallyBar();
+    stats.replaceWith(wrap.firstElementChild);
+    const newProg = wrap.lastElementChild;
+    document.querySelector('.progress').replaceWith(newProg);
+  }
+  const tbody = document.getElementById('cve-rows');
+  if (tbody && liveCVEs.length) {
+    tbody.innerHTML = liveCVEs.map(c => `
+      <tr class="clickable" data-cve="${esc(c.cve_id)}">
+        <td>${esc(c.cve_id)}</td>
+        <td>${esc(c.component || '')} ${esc(c.version || '')}</td>
+        <td><span class="verdict ${esc(c.final_verdict)}">${esc(c.final_verdict)}</span></td>
+        <td>${esc(c.decision || '')}</td>
+        <td>${c.duration_ms ? (c.duration_ms/1000).toFixed(1) + 's' : ''}</td>
+      </tr>`).join('');
+    tbody.querySelectorAll('tr.clickable').forEach(tr => {
+      tr.addEventListener('click',
+        () => showCveDetail(selectedRunId, tr.getAttribute('data-cve')));
+    });
+  }
+}
+
+// -------- new run form -------------------------------------------------
+$('#new-run-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const body = {
+    vulns_path: f.get('vulns_path'),
+    severities: String(f.get('severities') || '')
+      .split(',').map(s => s.trim()).filter(Boolean),
+    limit: parseInt(f.get('limit') || '0', 10),
+    workers: parseInt(f.get('workers') || '4', 10),
+    mode: f.get('mode'),
+  };
+  $('#start-btn').disabled = true;
+  $('#start-btn').textContent = 'Starting…';
+  try {
+    const r = await fetch(API + '/runs/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const t = await r.text();
+      alert('Start failed: ' + t);
+      return;
+    }
+    const d = await r.json();
+    await refreshRuns();
+    selectRun(d.run_id);
+  } finally {
+    $('#start-btn').disabled = false;
+    $('#start-btn').textContent = 'Start run';
+  }
+});
+
+// -------- boot ---------------------------------------------------------
+pingHealth();
+setInterval(pingHealth, 10_000);
+refreshRuns();
+setInterval(refreshRuns, 5_000);
+</script>
+</body>
+</html>

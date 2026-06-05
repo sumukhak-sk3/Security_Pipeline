@@ -1,0 +1,17 @@
+# Routing policy — controls when Workflow D escalates to humans regardless of
+# confidence scores. These caps protect against runaway/over-broad patches.
+patch_caps:
+  max_lines: 500
+  max_files: 5
+
+# Verdicts that may proceed without human review when confidence is high.
+auto_proceed_verdicts:
+  - package_upgrade
+  - not_applicable
+
+# Verdicts that always require Workflow E or human action; Workflow D never
+# applies them itself.
+hand_off_verdicts:
+  - code_change
+  - package_upgrade
+  - needs_human
