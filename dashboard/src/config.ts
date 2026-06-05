@@ -38,39 +38,49 @@ export const config = {
   },
 
   jenkins: {
-    baseUrl: env.VITE_JENKINS_BASE_URL ?? "",
     /**
-     * Jenkins job names per workflow.
+     * Default Jenkins base URL — kept for fallback / display only.
+     * Per-job URLs below take precedence and may live on a different instance.
+     */
+    baseUrl: env.VITE_JENKINS_BASE_URL ?? "https://jenkins.inca.infoblox.com",
+    /**
+     * FULL Jenkins job URL per workflow + job id (no trailing slash, no
+     * `/buildWithParameters` or build number).
      *
-     * Each workflow has multiple jobs. The key here MUST match the `id` of the
-     * corresponding Job in the data model so we can build a console URL with
-     * `jenkinsJobUrl(workflowId, jobId)`.
+     * The key MUST match the `id` of the matching Job in the data model.
+     * Empty string = no Jenkins backing (e.g. the orchestrator/mirror
+     * jobs run as shell scripts on a VM, not in Jenkins).
      *
-     * Override per-environment via env vars, e.g.:
-     *   VITE_JENKINS_JOB_E_ORCHESTRATOR=nios-orchestrator
-     *   VITE_JENKINS_JOB_E_MIRROR=jammy-mirror-sync
+     * Override per env var to point at a different folder or instance.
      */
     jobs: {
       // Workflow E — Build & Unit Tests
       E: {
         "e-orchestrator": env.VITE_JENKINS_JOB_E_ORCHESTRATOR ?? "",
         "e-mirror":       env.VITE_JENKINS_JOB_E_MIRROR ?? "",
-        "e-nios-build":   env.VITE_JENKINS_JOB_E_NIOS_BUILD ?? "",
-        "e-quick-ut":     env.VITE_JENKINS_JOB_E_QUICK_UT ?? "",
-        "e-slow-ut":      env.VITE_JENKINS_JOB_E_SLOW_UT ?? "",
+        "e-nios-build":   env.VITE_JENKINS_JOB_E_NIOS_BUILD ??
+                          "https://jenkins.inca.infoblox.com/job/NIOS-CVE-Analyser/job/NIOS-CVE-Build/job/CVE-BUILD",
+        "e-quick-ut":     env.VITE_JENKINS_JOB_E_QUICK_UT ??
+                          "http://10.197.38.69:8080/job/Automation_Quick_UT/job/unit_test_Bondi",
+        "e-slow-ut":      env.VITE_JENKINS_JOB_E_SLOW_UT ??
+                          "http://10.197.38.69:8080/job/Automation_Slow_UT/job/develop_9_2_base",
       },
-      // Workflow B — SBOM & CVE Scan
+      // Workflow B — SBOM & CVE Scan (still TBD — leave blank)
       B: {
         "b-extract": env.VITE_JENKINS_JOB_B_EXTRACT ?? "",
         "b-dtrack":  env.VITE_JENKINS_JOB_B_DTRACK ?? "",
         "b-s3":      env.VITE_JENKINS_JOB_B_S3 ?? "",
       },
-      // Workflow D — Impact Analysis
+      // Workflow D — Impact Analysis (all stages run inside one Jenkins pipeline)
       D: {
-        "d-poll":   env.VITE_JENKINS_JOB_D_POLL ?? "",
-        "d-index":  env.VITE_JENKINS_JOB_D_INDEX ?? "",
-        "d-impact": env.VITE_JENKINS_JOB_D_IMPACT ?? "",
-        "d-report": env.VITE_JENKINS_JOB_D_REPORT ?? "",
+        "d-poll":   env.VITE_JENKINS_JOB_D_POLL ??
+                    "https://jenkins.inca.infoblox.com/view/NIOS-CVE/job/NIOS-CVE-Analyser/job/test",
+        "d-index":  env.VITE_JENKINS_JOB_D_INDEX ??
+                    "https://jenkins.inca.infoblox.com/view/NIOS-CVE/job/NIOS-CVE-Analyser/job/test",
+        "d-impact": env.VITE_JENKINS_JOB_D_IMPACT ??
+                    "https://jenkins.inca.infoblox.com/view/NIOS-CVE/job/NIOS-CVE-Analyser/job/test",
+        "d-report": env.VITE_JENKINS_JOB_D_REPORT ??
+                    "https://jenkins.inca.infoblox.com/view/NIOS-CVE/job/NIOS-CVE-Analyser/job/test",
       },
     } as Record<"E" | "B" | "D", Record<string, string>>,
   },
@@ -87,9 +97,18 @@ export const config = {
   },
 
   impactAnalyser: {
-    apiUrl: env.VITE_IMPACT_API_URL ?? "",
+    /** Backend API base URL (the FastAPI-style service the Jenkinsfile hits). */
+    apiUrl: env.VITE_IMPACT_API_URL ?? "http://10.120.23.89:8088",
+    /** Frontend UI URL — also used as the default redirect button target. */
+    uiUrl: env.VITE_IMPACT_UI_URL ?? "http://10.120.23.89:5173",
     defaultAuthorModel: env.VITE_IMPACT_AUTHOR_MODEL ?? "",
     defaultVerifierModel: env.VITE_IMPACT_VERIFIER_MODEL ?? "",
+    /** URL for the "open analyser" redirect button on the Impact Analysis page. */
+    redirectUrl:
+      env.VITE_IMPACT_REDIRECT_URL ??
+      env.VITE_IMPACT_UI_URL ??
+      "http://10.120.23.89:5173",
+    redirectLabel: env.VITE_IMPACT_REDIRECT_LABEL ?? "Open Impact Analyser",
   },
 
   features: {
@@ -107,19 +126,12 @@ export type AppConfig = typeof config;
 
 export type WorkflowKey = "E" | "B" | "D";
 
-/** Jenkins job name for a given workflow + job id (from the data model). */
-export function jenkinsJobName(wf: WorkflowKey, jobId: string): string {
-  return config.jenkins.jobs[wf]?.[jobId] ?? "";
-}
-
-/** Link to the Jenkins job page (latest build). Empty string if not configured. */
+/** Full Jenkins job URL for a given workflow + job id (empty if not configured). */
 export function jenkinsJobUrl(wf: WorkflowKey, jobId: string): string {
-  const name = jenkinsJobName(wf, jobId);
-  if (!config.jenkins.baseUrl || !name) return "";
-  return `${config.jenkins.baseUrl}/job/${encodeURIComponent(name)}`;
+  return (config.jenkins.jobs[wf]?.[jobId] ?? "").replace(/\/+$/, "");
 }
 
-/** Link to a specific Jenkins build's console page. */
+/** Console URL for a specific build of a Jenkins job. */
 export function jenkinsConsoleUrl(
   wf: WorkflowKey,
   jobId: string,
@@ -128,6 +140,18 @@ export function jenkinsConsoleUrl(
   const base = jenkinsJobUrl(wf, jobId);
   if (!base) return "";
   return `${base}/${buildNumber}/console`;
+}
+
+/** Convenience: the bare Jenkins job name (last URL segment, decoded). */
+export function jenkinsJobName(wf: WorkflowKey, jobId: string): string {
+  const url = jenkinsJobUrl(wf, jobId);
+  if (!url) return "";
+  const last = url.split("/").pop() ?? "";
+  try {
+    return decodeURIComponent(last);
+  } catch {
+    return last;
+  }
 }
 
 /**

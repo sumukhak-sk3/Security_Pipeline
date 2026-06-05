@@ -1,0 +1,154 @@
+import { useEffect, useState } from "react";
+import {
+  fetchJob,
+  fetchRunStages,
+  type JenkinsJob,
+  type JenkinsBuild,
+  type JenkinsStage,
+} from "../api/jenkinsClient";
+import { config } from "../config";
+import type { Status } from "../types";
+import { buildStatus, computeProgress, headlineBuild, stagesOf } from "../lib/jenkinsMap";
+
+export interface LiveJobSummary {
+  id: string;
+  title: string;
+  jenkinsUrl: string;
+  job: JenkinsJob | null;
+  headline: JenkinsBuild | null;
+  stages: JenkinsStage[] | null;
+  status: Status;
+  progress: number;
+  error: string | null;
+}
+
+export interface LiveWorkflowSummary {
+  loading: boolean;
+  status: Status;
+  progress: number;
+  jobsTotal: number;
+  jobsDone: number;
+  jobsRunning: number;
+  jobsFailed: number;
+  jobs: LiveJobSummary[];
+}
+
+interface JobSpec {
+  id: string;
+  title: string;
+  jenkinsUrl: string;
+}
+
+function aggregate(items: LiveJobSummary[]): Omit<LiveWorkflowSummary, "loading" | "jobs"> {
+  const total = items.length || 1;
+  const done = items.filter((i) => i.status === "success").length;
+  const running = items.filter((i) => i.status === "running").length;
+  const failed = items.filter((i) => i.status === "failed").length;
+  const progress = Math.round(items.reduce((a, i) => a + i.progress, 0) / total);
+
+  let status: Status = "pending";
+  if (failed > 0) status = "failed";
+  else if (running > 0) status = "running";
+  else if (done === total) status = "success";
+  else if (done > 0) status = "running";
+
+  return { status, progress, jobsTotal: items.length, jobsDone: done, jobsRunning: running, jobsFailed: failed };
+}
+
+/**
+ * Polls a fixed list of Jenkins jobs and aggregates their state into a
+ * workflow-level summary. Stage info is fetched per job so per-job progress
+ * reflects actual pipeline advancement (not just elapsed/estimated time).
+ */
+export function useWorkflowLiveSummary(jobs: JobSpec[]): LiveWorkflowSummary {
+  const [tick, setTick] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [items, setItems] = useState<LiveJobSummary[]>(() =>
+    jobs.map((j) => ({
+      id: j.id,
+      title: j.title,
+      jenkinsUrl: j.jenkinsUrl,
+      job: null,
+      headline: null,
+      stages: null,
+      status: "pending",
+      progress: 0,
+      error: null,
+    })),
+  );
+
+  const specKey = jobs.map((j) => `${j.id}|${j.jenkinsUrl}`).join(",");
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+
+    Promise.all(
+      jobs.map(async (spec): Promise<LiveJobSummary> => {
+        if (!spec.jenkinsUrl) {
+          return {
+            id: spec.id,
+            title: spec.title,
+            jenkinsUrl: "",
+            job: null,
+            headline: null,
+            stages: null,
+            status: "pending",
+            progress: 0,
+            error: null,
+          };
+        }
+        try {
+          const job = await fetchJob(spec.jenkinsUrl);
+          const headline = headlineBuild(job);
+          let stages: JenkinsStage[] | null = null;
+          if (headline) {
+            const describe = await fetchRunStages(spec.jenkinsUrl, headline.number);
+            stages = stagesOf(describe);
+          }
+          return {
+            id: spec.id,
+            title: spec.title,
+            jenkinsUrl: spec.jenkinsUrl,
+            job,
+            headline,
+            stages,
+            status: buildStatus(headline),
+            progress: computeProgress(headline, stages),
+            error: null,
+          };
+        } catch (e) {
+          return {
+            id: spec.id,
+            title: spec.title,
+            jenkinsUrl: spec.jenkinsUrl,
+            job: null,
+            headline: null,
+            stages: null,
+            status: "pending",
+            progress: 0,
+            error: (e as Error).message,
+          };
+        }
+      }),
+    ).then((results) => {
+      if (cancelled) return;
+      setItems(results);
+      setLoading(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [specKey, tick]);
+
+  useEffect(() => {
+    const ms = config.api.pollIntervalMs;
+    if (!ms || ms <= 0) return;
+    const t = setInterval(() => setTick((n) => n + 1), ms);
+    return () => clearInterval(t);
+  }, []);
+
+  return { loading, jobs: items, ...aggregate(items) };
+}
