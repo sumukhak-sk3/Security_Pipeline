@@ -146,3 +146,32 @@ export async function fetchConsoleProgressive(
   const nextOffset = sizeHeader > 0 ? sizeHeader : since + text.length;
   return { text, nextOffset, more };
 }
+
+/**
+ * Fetch the build parameters of the latest build for a Jenkins job.
+ * Returns a key-value map of parameter names to values.
+ */
+export async function fetchLatestBuildParams(
+  jobUrl: string,
+): Promise<Record<string, string>> {
+  const proxied = toProxyUrl(jobUrl);
+  if (!proxied) return {};
+  const tree = encodeURIComponent("actions[parameters[name,value]]");
+  const url = `${proxied}/lastBuild/api/json?tree=${tree}`;
+  try {
+    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!res.ok) return {};
+    const data = await res.json();
+    const params: Record<string, string> = {};
+    for (const action of data?.actions ?? []) {
+      if (action?.parameters) {
+        for (const p of action.parameters) {
+          if (p?.name) params[p.name] = p.value ?? "";
+        }
+      }
+    }
+    return params;
+  } catch {
+    return {};
+  }
+}

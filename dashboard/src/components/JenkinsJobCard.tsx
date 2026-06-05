@@ -1,6 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useJenkinsJob } from "../hooks/useJenkinsJob";
+import { useReportPortalLaunch } from "../hooks/useReportPortal";
+import { fetchLatestBuildParams } from "../api/jenkinsClient";
+import { fetchCachedJenkinsJob } from "../api/cachedClient";
+import { awaitPrefetch } from "../api/prefetch";
 import type { JenkinsBuild, JenkinsStage } from "../api/jenkinsClient";
+import type { LaunchSummary, FailedItem } from "../api/reportPortalClient";
 import StatusPill from "./StatusPill";
 import ProgressBar from "./ProgressBar";
 import JenkinsConsoleDrawer from "./JenkinsConsoleDrawer";
@@ -27,10 +32,74 @@ function relTime(epochMs: number): string {
 interface JobProps {
   readonly title: string;
   readonly jenkinsUrl: string;
+  /** If provided, fetches UT results from ReportPortal for this branch tag + ut type */
+  readonly rpBranchTag?: string;
+  /** "quick" or "slow" — determines which RP launch to look up */
+  readonly rpUtType?: "quick" | "slow";
 }
 
-export default function JenkinsJobCard({ title, jenkinsUrl }: JobProps) {
+export default function JenkinsJobCard({ title, jenkinsUrl, rpBranchTag, rpUtType }: JobProps) {
   const { loading, job, stages, error, refresh } = useJenkinsJob(jenkinsUrl);
+  const [autoBranch, setAutoBranch] = useState<string | undefined>();
+  const [buildParams, setBuildParams] = useState<Record<string, string>>({});
+
+  // When no explicit rpBranchTag with a date is given, fetch the BUILD param
+  // from the cache (instant) or fallback to latest Jenkins build.
+  useEffect(() => {
+    if (!jenkinsUrl) return;
+
+    // Derive job ID from URL for cache lookup
+    const id = jenkinsUrl.includes("Quick_UT") ? "e-quick-ut"
+      : jenkinsUrl.includes("Slow_UT") ? "e-slow-ut"
+      : jenkinsUrl.includes("CVE-BUILD") ? "e-nios-build"
+      : jenkinsUrl.includes("NIOS-CVE-Analyser") ? "d-impact" : null;
+
+    const tryCache = async () => {
+      if (id) {
+        const pre = await awaitPrefetch();
+        const cached = pre?.jenkins?.jobs?.[id];
+        if (cached?.buildParams) {
+          setBuildParams(cached.buildParams);
+          if (rpUtType && cached.buildParams.BUILD) {
+            setAutoBranch(cached.buildParams.BUILD.replace(/\//g, "_"));
+            return;
+          }
+          if (!rpUtType) return; // Non-UT: we have params, done
+        }
+        // Fallback: fetch from cache API if prefetch had no data
+        if (!cached?.buildParams) {
+          try {
+            const res = await fetchCachedJenkinsJob(id);
+            if (res?.buildParams) {
+              setBuildParams(res.buildParams);
+              if (rpUtType && res.buildParams.BUILD) {
+                setAutoBranch(res.buildParams.BUILD.replace(/\//g, "_"));
+                return;
+              }
+              if (!rpUtType) return;
+            }
+          } catch { /* ignore */ }
+        }
+      }
+      if (rpUtType) {
+        // Fallback to direct Jenkins API call
+        const params = await fetchLatestBuildParams(jenkinsUrl);
+        setBuildParams(params);
+        const build = params["BUILD"] ?? params["BRANCH"] ?? params["branch"] ?? "";
+        if (build) {
+          setAutoBranch(build.replace(/\//g, "_"));
+        }
+      }
+    };
+    tryCache();
+  }, [jenkinsUrl, rpBranchTag, rpUtType]);
+
+  // Use explicit branch if it has a date, otherwise use auto-detected branch
+  const effectiveBranchTag = (rpBranchTag && /\d{4}-\d{2}-\d{2}/.test(rpBranchTag))
+    ? rpBranchTag
+    : autoBranch;
+
+  const rp = useReportPortalLaunch(effectiveBranchTag, rpUtType);
   const [open, setOpen] = useState(false);
   const [consoleFor, setConsoleFor] = useState<number | null>(null);
 
@@ -38,6 +107,10 @@ export default function JenkinsJobCard({ title, jenkinsUrl }: JobProps) {
     return <NoJenkinsCard title={title} reason="No Jenkins URL configured" />;
   }
   if (loading && !job) {
+    return <SkeletonCard title={title} />;
+  }
+  if (!job && !error) {
+    // No data yet (server hasn't been reachable) — show skeleton, not error
     return <SkeletonCard title={title} />;
   }
   if (error || !job) {
@@ -94,6 +167,8 @@ export default function JenkinsJobCard({ title, jenkinsUrl }: JobProps) {
             <div className="mt-3">
               <ProgressBar value={progress} status={status} showLabel />
             </div>
+            {/* Summary strip — branch + key params */}
+            <BuildSummaryStrip params={buildParams} rpUtType={rpUtType} rp={rp} />
             <div className="mt-2 grid grid-cols-2 gap-2 text-[11px] text-ink-muted sm:grid-cols-4">
               <Field label="Build">
                 {headline ? `#${headline.number}` : "—"}
@@ -110,6 +185,7 @@ export default function JenkinsJobCard({ title, jenkinsUrl }: JobProps) {
                   : "—"}
               </Field>
             </div>
+            {rp.summary && <RPBadge summary={rp.summary} />}
           </div>
           <div className="flex shrink-0 flex-col items-end gap-2">
             <button
@@ -138,6 +214,7 @@ export default function JenkinsJobCard({ title, jenkinsUrl }: JobProps) {
 
         {open && (
           <div className="border-t border-line">
+            {rp.summary && <RPResultsSection summary={rp.summary} failedItems={rp.failedItems} />}
             <StagesSection stages={stages?.stages ?? null} />
             <HistorySection
               builds={job.builds}
@@ -336,6 +413,221 @@ function NoJenkinsCard({
         <div className="truncate text-sm font-medium text-ink-muted">{title}</div>
         <span className="text-[11px] text-ink-subtle">{reason}</span>
       </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Build summary strip (branch, params, RP inline)                     */
+/* ------------------------------------------------------------------ */
+
+function BuildSummaryStrip({
+  params,
+  rpUtType,
+  rp,
+}: {
+  readonly params: Record<string, string>;
+  readonly rpUtType?: "quick" | "slow";
+  readonly rp: { summary: LaunchSummary | null; failedItems?: FailedItem[] };
+}) {
+  if (!params || Object.keys(params).length === 0) return null;
+
+  // Determine card type from params
+  const isUT = !!rpUtType;
+  const isImpact = !!params.SEVERITIES || !!params.ANALYSIS_MODE;
+  const isBuild = !!params.BUILD_PATH && !isUT && !isImpact;
+
+  const branch = params.BUILD ?? params.BUILD_PATH ?? params.BRANCH ?? "";
+
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 rounded bg-surface-2/60 px-3 py-1.5 text-[11px]">
+      {/* Branch */}
+      {branch && (
+        <span className="inline-flex items-center gap-1">
+          <svg className="h-3 w-3 text-ink-subtle" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h7" />
+          </svg>
+          <span className="font-medium text-ink">{branch}</span>
+        </span>
+      )}
+
+      {/* UT-specific: just branch name */}
+      {isUT && null}
+
+      {/* Impact-specific: severities, mode, workers, CVEs */}
+      {isImpact && (
+        <>
+          {params.SEVERITIES && (
+            <span className="rounded bg-red-500/10 px-1.5 py-0.5 font-medium text-red-600 dark:text-red-400">
+              {params.SEVERITIES}
+            </span>
+          )}
+          {params.ANALYSIS_MODE && (
+            <span className="text-ink-muted">
+              mode: <span className="font-medium text-ink">{params.ANALYSIS_MODE}</span>
+            </span>
+          )}
+          {params.WORKERS && (
+            <span className="text-ink-muted">
+              {params.WORKERS} workers
+            </span>
+          )}
+          {params.LIMIT && params.LIMIT !== "0" && (
+            <span className="text-ink-muted">
+              limit: {params.LIMIT}
+            </span>
+          )}
+          {params.LIMIT === "0" && (
+            <span className="text-ink-muted">all CVEs</span>
+          )}
+        </>
+      )}
+
+      {/* Build-specific: just branch + email */}
+      {isBuild && params.EMAIL_LIST && (
+        <span className="text-ink-muted truncate max-w-[200px]" title={params.EMAIL_LIST}>
+          notify: {params.EMAIL_LIST}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* ReportPortal inline sections                                        */
+/* ------------------------------------------------------------------ */
+
+function RPBadge({ summary }: { readonly summary: LaunchSummary }) {
+  const passRate = summary.total > 0 ? Math.round((summary.passed / summary.total) * 100) : 0;
+  const hasFails = summary.failed > 0;
+
+  return (
+    <div className="mt-2 flex items-center gap-2 whitespace-nowrap rounded bg-surface-2 px-3 py-1.5">
+      <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-subtle">
+        ReportPortal
+      </span>
+      <div className="flex items-center gap-2 text-[11px]">
+        <span className="text-green-600 dark:text-green-400">{summary.passed} passed</span>
+        <span className="text-ink-subtle">·</span>
+        {hasFails && (
+          <>
+            <span className="text-red-600 dark:text-red-400">{summary.failed} failed</span>
+            <span className="text-ink-subtle">·</span>
+          </>
+        )}
+        <span className="text-ink-muted">{summary.total} total</span>
+        <span className="text-ink-subtle">·</span>
+        <span className="text-ink-muted">{passRate}%</span>
+      </div>
+      <a
+        href={summary.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="ml-auto text-[10px] text-accent hover:underline"
+      >
+        Open ↗
+      </a>
+    </div>
+  );
+}
+
+function RPResultsSection({
+  summary,
+  failedItems,
+}: {
+  readonly summary: LaunchSummary;
+  readonly failedItems?: FailedItem[];
+}) {
+  const [showFailed, setShowFailed] = useState(false);
+
+  return (
+    <div className="px-4 py-3">
+      <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-ink-subtle">
+        ReportPortal — {summary.name}
+      </div>
+      <div className="grid grid-cols-2 gap-2 text-[11px] text-ink-muted sm:grid-cols-5">
+        <div>
+          <div className="text-[10px] font-semibold uppercase text-ink-subtle">Status</div>
+          <div className={cn(
+            "font-medium",
+            summary.failed > 0 ? "text-red-600 dark:text-red-400" : "text-green-600 dark:text-green-400"
+          )}>
+            {summary.status}
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] font-semibold uppercase text-ink-subtle">Total</div>
+          <div>{summary.total}</div>
+        </div>
+        <div>
+          <div className="text-[10px] font-semibold uppercase text-ink-subtle">Passed</div>
+          <div className="text-green-600 dark:text-green-400">{summary.passed}</div>
+        </div>
+        <div>
+          <div className="text-[10px] font-semibold uppercase text-ink-subtle">Failed</div>
+          <div className={summary.failed > 0 ? "text-red-600 dark:text-red-400" : ""}>
+            {summary.failed}
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] font-semibold uppercase text-ink-subtle">Skipped</div>
+          <div>{summary.skipped}</div>
+        </div>
+      </div>
+
+      {failedItems && failedItems.length > 0 && (
+        <div className="mt-3">
+          <button
+            onClick={() => setShowFailed(!showFailed)}
+            className="flex items-center gap-1 text-[11px] font-medium text-ink-muted hover:text-ink"
+          >
+            <svg
+              className={cn("h-3 w-3 transition-transform", showFailed && "rotate-90")}
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+            </svg>
+            {failedItems.length} failed test{failedItems.length > 1 ? "s" : ""}
+          </button>
+
+          {showFailed && (
+            <div className="mt-2 max-h-60 space-y-2 overflow-y-auto">
+              {failedItems.map((item, i) => (
+                <RPFailedItemRow key={i} item={item} />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RPFailedItemRow({ item }: { readonly item: FailedItem }) {
+  const [showLogs, setShowLogs] = useState(false);
+
+  return (
+    <div className="rounded bg-surface-2 px-2 py-1.5 text-[11px]">
+      <div className="font-medium text-red-600 dark:text-red-400">{item.name}</div>
+      {item.path && <div className="text-ink-subtle">{item.path}</div>}
+      {item.sampleLogs.length > 0 && (
+        <>
+          <button
+            onClick={() => setShowLogs(!showLogs)}
+            className="mt-1 text-[10px] text-accent hover:underline"
+          >
+            {showLogs ? "Hide logs" : "Show logs"}
+          </button>
+          {showLogs && (
+            <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded bg-surface-0 p-1.5 font-mono text-[10px] text-ink-muted">
+              {item.sampleLogs.map((l) => `[${l.level}] ${l.message}`).join("\n")}
+            </pre>
+          )}
+        </>
+      )}
     </div>
   );
 }

@@ -18,6 +18,10 @@ import { cn } from "../lib/cn";
 export default function WorkflowPage() {
   const { id } = useParams();
   const [openJob, setOpenJob] = useState<Job | null>(null);
+  // Branch for RP lookup:
+  // - Empty string = no explicit override → RP client searches for latest "bugfix_ubuntu-mirror" launch
+  // - User types a branch in TriggerPanel → uses that specific branch tag
+  const [rpBranch, setRpBranch] = useState("");
 
   const wfId = (id ?? "").toUpperCase() as WorkflowId;
   const workflow = currentRun.workflows.find((w) => w.id === wfId);
@@ -98,7 +102,7 @@ export default function WorkflowPage() {
 
       {isImpact && <ImpactLivePanel />}
 
-      {isBuild && <TriggerPanel />}
+      {isBuild && <TriggerPanel onBranchChange={setRpBranch} />}
 
       {isLive ? (
         <section className="space-y-3">
@@ -110,7 +114,23 @@ export default function WorkflowPage() {
           </div>
           <div className="space-y-3">
             {liveSpecs.map((j) => (
-              <JenkinsJobCard key={j.id} title={j.title} jenkinsUrl={j.jenkinsUrl} />
+              <JenkinsJobCard
+                key={j.id}
+                title={j.title}
+                jenkinsUrl={j.jenkinsUrl}
+                rpBranchTag={
+                  (j.id === "e-quick-ut" || j.id === "e-slow-ut")
+                    ? (rpBranch.trim()
+                        ? rpBranch.trim().replace(/\//g, "_")
+                        : "bugfix_ubuntu-mirror")
+                    : undefined
+                }
+                rpUtType={
+                  j.id === "e-quick-ut" ? "quick"
+                    : j.id === "e-slow-ut" ? "slow"
+                    : undefined
+                }
+              />
             ))}
           </div>
         </section>
@@ -134,13 +154,19 @@ export default function WorkflowPage() {
 /* Trigger Panel — branch input + fire button for Workflow E           */
 /* ------------------------------------------------------------------ */
 
-function TriggerPanel() {
+function TriggerPanel({ onBranchChange }: { onBranchChange?: (branch: string) => void }) {
   const [branch, setBranch] = useState("");
   const [activeAction, setActiveAction] = useState<"none" | "test" | "trigger">("none");
   const [result, setResult] = useState<{ type: "success" | "error"; msg: string } | null>(null);
 
   const placeholder = `bugfix/ubuntu-mirror-${new Date().toISOString().slice(0, 10)}`;
   const busy = activeAction !== "none";
+
+  const handleBranchChange = (value: string) => {
+    setBranch(value);
+    // Pass empty string when input is cleared → triggers broad "latest" search
+    onBranchChange?.(value);
+  };
 
   const handleTrigger = async () => {
     setActiveAction("trigger");
@@ -190,7 +216,7 @@ function TriggerPanel() {
             id="branch-input"
             type="text"
             value={branch}
-            onChange={(e) => setBranch(e.target.value)}
+            onChange={(e) => handleBranchChange(e.target.value)}
             placeholder={placeholder}
             className="w-full rounded-md border border-line bg-surface-2 px-3 py-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
           />

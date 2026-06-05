@@ -1,5 +1,6 @@
 import { defineConfig, loadEnv, type ProxyOptions } from "vite";
 import react from "@vitejs/plugin-react";
+import { backendPlugin } from "./vite-backend-plugin";
 
 /**
  * Vite dev server config.
@@ -37,6 +38,7 @@ export default defineConfig(({ mode }) => {
     env.IMPACT_JENKINS_USER && env.IMPACT_JENKINS_API_TOKEN
       ? `${env.IMPACT_JENKINS_USER}:${env.IMPACT_JENKINS_API_TOKEN}`
       : incaAuth;
+  const rpToken = env.RP_BEARER_KEY ?? "";
 
   // Boot log so missing tokens are obvious in the terminal.
   // eslint-disable-next-line no-console
@@ -45,6 +47,7 @@ export default defineConfig(({ mode }) => {
     `inca=${incaAuth ? "set" : "MISSING"}`,
     `ut=${utAuth ? "set" : "MISSING"}`,
     `impact=${impactAuth ? "set" : "MISSING"}`,
+    `rp=${rpToken ? "set" : "MISSING"}`,
   );
 
   const stripBasicChallenge: ProxyOptions["configure"] = (proxy) => {
@@ -58,9 +61,12 @@ export default defineConfig(({ mode }) => {
   };
 
   return {
-    plugins: [react()],
+    plugins: [react(), backendPlugin()],
     server: {
       port: 5173,
+      hmr: {
+        path: "/__vite_hmr",  // Use explicit path so it doesn't conflict with /_ws
+      },
       proxy: {
         "/_jenkins/impact": {
           target: "https://jenkins.inca.infoblox.com",
@@ -85,6 +91,23 @@ export default defineConfig(({ mode }) => {
           auth: utAuth,
           rewrite: (p) => p.replace(/^\/_jenkins\/ut/, ""),
           configure: stripBasicChallenge,
+        },
+        "/_rp": {
+          target: "http://10.34.98.129:8080",
+          changeOrigin: true,
+          secure: false,
+          rewrite: (p) => p.replace(/^\/_rp/, ""),
+          configure: (proxy) => {
+            proxy.on("proxyReq", (proxyReq) => {
+              if (rpToken) {
+                proxyReq.setHeader("Authorization", `Bearer ${rpToken}`);
+              }
+            });
+            proxy.on("error", (err) => {
+              // eslint-disable-next-line no-console
+              console.error("[vite proxy] RP upstream error:", err.message);
+            });
+          },
         },
       },
     },

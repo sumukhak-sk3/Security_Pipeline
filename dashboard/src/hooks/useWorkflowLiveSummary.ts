@@ -6,6 +6,9 @@ import {
   type JenkinsBuild,
   type JenkinsStage,
 } from "../api/jenkinsClient";
+import { fetchCachedJenkins, toJenkinsJob } from "../api/cachedClient";
+import { awaitPrefetch } from "../api/prefetch";
+import { useBackendWs } from "./useBackendWs";
 import { config } from "../config";
 import type { Status } from "../types";
 import { buildStatus, computeProgress, headlineBuild, stagesOf } from "../lib/jenkinsMap";
@@ -83,63 +86,75 @@ export function useWorkflowLiveSummary(jobs: JobSpec[]): LiveWorkflowSummary {
     let cancelled = false;
     setLoading(true);
 
-    Promise.all(
-      jobs.map(async (spec): Promise<LiveJobSummary> => {
-        if (!spec.jenkinsUrl) {
-          return {
-            id: spec.id,
-            title: spec.title,
-            jenkinsUrl: "",
-            job: null,
-            headline: null,
-            stages: null,
-            status: "pending",
-            progress: 0,
-            error: null,
-          };
-        }
-        try {
-          const job = await fetchJob(spec.jenkinsUrl);
-          const headline = headlineBuild(job);
-          let stages: JenkinsStage[] | null = null;
-          if (headline) {
-            const describe = await fetchRunStages(spec.jenkinsUrl, headline.number);
-            stages = stagesOf(describe);
+    const fetchFromCache = async (): Promise<boolean> => {
+      try {
+        // Use prefetch (single request already in flight) for instant data
+        const pre = await awaitPrefetch();
+        const allCached = pre?.jenkins?.jobs ?? await fetchCachedJenkins();
+        if (cancelled) return true;
+        const results: LiveJobSummary[] = jobs.map((spec) => {
+          const cached = allCached[spec.id];
+          if (!cached) {
+            return {
+              id: spec.id, title: spec.title, jenkinsUrl: spec.jenkinsUrl,
+              job: null, headline: null, stages: null, status: "pending" as Status, progress: 0, error: null,
+            };
           }
+          const job = toJenkinsJob(cached);
+          const headline = headlineBuild(job);
+          const stages = stagesOf(cached.stages);
           return {
-            id: spec.id,
-            title: spec.title,
-            jenkinsUrl: spec.jenkinsUrl,
-            job,
-            headline,
-            stages,
+            id: spec.id, title: spec.title, jenkinsUrl: spec.jenkinsUrl,
+            job, headline, stages,
             status: buildStatus(headline),
             progress: computeProgress(headline, stages),
             error: null,
           };
-        } catch (e) {
-          return {
-            id: spec.id,
-            title: spec.title,
-            jenkinsUrl: spec.jenkinsUrl,
-            job: null,
-            headline: null,
-            stages: null,
-            status: "pending",
-            progress: 0,
-            error: (e as Error).message,
-          };
-        }
-      }),
-    ).then((results) => {
-      if (cancelled) return;
-      setItems(results);
-      setLoading(false);
-    });
-
-    return () => {
-      cancelled = true;
+        });
+        if (!cancelled) { setItems(results); setLoading(false); }
+        return true;
+      } catch {
+        return false; // cache unavailable, fall through
+      }
     };
+
+    const fetchDirect = async () => {
+      const results = await Promise.all(
+        jobs.map(async (spec): Promise<LiveJobSummary> => {
+          if (!spec.jenkinsUrl) {
+            return {
+              id: spec.id, title: spec.title, jenkinsUrl: "",
+              job: null, headline: null, stages: null, status: "pending", progress: 0, error: null,
+            };
+          }
+          try {
+            const job = await fetchJob(spec.jenkinsUrl);
+            const headline = headlineBuild(job);
+            let stages: JenkinsStage[] | null = null;
+            if (headline) {
+              const describe = await fetchRunStages(spec.jenkinsUrl, headline.number);
+              stages = stagesOf(describe);
+            }
+            return {
+              id: spec.id, title: spec.title, jenkinsUrl: spec.jenkinsUrl,
+              job, headline, stages,
+              status: buildStatus(headline), progress: computeProgress(headline, stages), error: null,
+            };
+          } catch (e) {
+            return {
+              id: spec.id, title: spec.title, jenkinsUrl: spec.jenkinsUrl,
+              job: null, headline: null, stages: null, status: "pending", progress: 0, error: (e as Error).message,
+            };
+          }
+        }),
+      );
+      if (!cancelled) { setItems(results); setLoading(false); }
+    };
+
+    // Try cache first, fallback to direct
+    fetchFromCache().then((ok) => { if (!ok && !cancelled) fetchDirect(); });
+
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [specKey, tick]);
 

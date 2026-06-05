@@ -158,6 +158,25 @@ vite.config.ts   # dev proxy with server-side Basic Auth
 - ✅ Run `git ls-files | xargs grep -nE '<your_token_pattern>'` before each
   push to confirm nothing leaked.
 
+## Removing the backend plugin (optional)
+
+The embedded caching proxy (`vite-backend-plugin.ts`) provides server-side
+polling, in-memory caching, WebSocket push updates, and inline prefetch data.
+If your architecture does not require WebSocket or server-side caching (e.g.
+you have a separate backend service, or you only need the Vite dev proxy for
+direct API calls), you can safely remove it:
+
+1. Delete `vite-backend-plugin.ts`
+2. In `vite.config.ts`, remove the `import { backendPlugin }` line and remove
+   `backendPlugin()` from the `plugins` array
+3. Delete `src/api/prefetch.ts` and remove the `startPrefetch()` call from
+   `src/main.tsx`
+4. Delete `src/hooks/useBackendWs.ts`
+
+The existing proxy routes (`/_jenkins/*`, `/_rp/*`) in `vite.config.ts` will
+continue to work as before — components will fall back to direct API calls
+through those proxies.
+
 ## Build
 
 ```bash
