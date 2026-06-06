@@ -40,7 +40,7 @@ if (typeof window !== "undefined" && window.__PREFETCH_DATA__) {
  */
 export function startPrefetch(): void {
   if (prefetchPromise) return;
-  prefetchPromise = fetch("/_api/all")
+  prefetchPromise = fetch("/_api/all", { signal: AbortSignal.timeout(12_000) })
     .then((res) => (res.ok ? res.json() : null))
     .then((data) => {
       prefetchResult = data;

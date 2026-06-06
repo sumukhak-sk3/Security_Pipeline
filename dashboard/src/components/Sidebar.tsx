@@ -14,6 +14,7 @@ export default function Sidebar() {
       to: `/workflows/${w.id}`,
       label: w.shortName,
     })),
+    { to: "/cicd", label: "CICD" },
     { to: "/history", label: "History" },
     ...(config.features.metrics ? [{ to: "/metrics", label: "Metrics" }] : []),
   ];

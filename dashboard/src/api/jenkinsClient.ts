@@ -26,6 +26,10 @@ const PROXY_MAP: Array<{ match: RegExp; replace: string }> = [
     match: /^https?:\/\/10\.197\.38\.69:8080/i,
     replace: "/_jenkins/ut",
   },
+  {
+    match: /^https?:\/\/jenkins-qa2\.inca\.infoblox\.com/i,
+    replace: "/_jenkins/qa2",
+  },
 ];
 
 /** Convert a real Jenkins URL into the dev-server proxy path. */
@@ -97,7 +101,7 @@ export async function fetchJob(jobUrl: string): Promise<JenkinsJob> {
   const proxied = toProxyUrl(jobUrl);
   if (!proxied) throw new Error("Job URL not configured");
   const url = `${proxied}/api/json?tree=${encodeURIComponent(JOB_TREE)}`;
-  const res = await fetch(url, { headers: { Accept: "application/json" } });
+  const res = await fetch(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(10_000) });
   if (!res.ok) {
     throw new Error(`Jenkins ${res.status} ${res.statusText}`);
   }
@@ -116,7 +120,7 @@ export async function fetchRunStages(
   if (!proxied) return null;
   const url = `${proxied}/${buildNumber}/wfapi/describe`;
   try {
-    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    const res = await fetch(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(10_000) });
     if (!res.ok) return null;
     return (await res.json()) as JenkinsRunDescribe;
   } catch {
@@ -159,7 +163,7 @@ export async function fetchLatestBuildParams(
   const tree = encodeURIComponent("actions[parameters[name,value]]");
   const url = `${proxied}/lastBuild/api/json?tree=${tree}`;
   try {
-    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    const res = await fetch(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(10_000) });
     if (!res.ok) return {};
     const data = await res.json();
     const params: Record<string, string> = {};

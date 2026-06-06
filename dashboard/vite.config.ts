@@ -38,6 +38,10 @@ export default defineConfig(({ mode }) => {
     env.IMPACT_JENKINS_USER && env.IMPACT_JENKINS_API_TOKEN
       ? `${env.IMPACT_JENKINS_USER}:${env.IMPACT_JENKINS_API_TOKEN}`
       : incaAuth;
+  const qa2Auth =
+    env.QA2_JENKINS_USER && env.QA2_JENKINS_API_TOKEN
+      ? `${env.QA2_JENKINS_USER}:${env.QA2_JENKINS_API_TOKEN}`
+      : incaAuth;
   const rpToken = env.RP_BEARER_KEY ?? "";
 
   // Boot log so missing tokens are obvious in the terminal.
@@ -47,6 +51,7 @@ export default defineConfig(({ mode }) => {
     `inca=${incaAuth ? "set" : "MISSING"}`,
     `ut=${utAuth ? "set" : "MISSING"}`,
     `impact=${impactAuth ? "set" : "MISSING"}`,
+    `qa2=${qa2Auth ? "set" : "MISSING"}`,
     `rp=${rpToken ? "set" : "MISSING"}`,
   );
 
@@ -90,6 +95,14 @@ export default defineConfig(({ mode }) => {
           secure: false,
           auth: utAuth,
           rewrite: (p) => p.replace(/^\/_jenkins\/ut/, ""),
+          configure: stripBasicChallenge,
+        },
+        "/_jenkins/qa2": {
+          target: "https://jenkins-qa2.inca.infoblox.com",
+          changeOrigin: true,
+          secure: false,
+          auth: qa2Auth,
+          rewrite: (p) => p.replace(/^\/_jenkins\/qa2/, ""),
           configure: stripBasicChallenge,
         },
         "/_rp": {

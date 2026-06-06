@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useJenkinsJob } from "../hooks/useJenkinsJob";
-import { useReportPortalLaunch } from "../hooks/useReportPortal";
+import { useReportPortalLaunch, type ReportPortalLaunchState } from "../hooks/useReportPortal";
 import { fetchLatestBuildParams } from "../api/jenkinsClient";
 import { fetchCachedJenkinsJob } from "../api/cachedClient";
 import { awaitPrefetch } from "../api/prefetch";
@@ -94,10 +94,12 @@ export default function JenkinsJobCard({ title, jenkinsUrl, rpBranchTag, rpUtTyp
     tryCache();
   }, [jenkinsUrl, rpBranchTag, rpUtType]);
 
-  // Use explicit branch if it has a date, otherwise use auto-detected branch
+  // Use explicit branch if it has a date, otherwise use auto-detected branch.
+  // If Jenkins is unreachable and autoBranch is unset, fall back to the generic
+  // prefix so the RP hook can still search for the latest matching launch.
   const effectiveBranchTag = (rpBranchTag && /\d{4}-\d{2}-\d{2}/.test(rpBranchTag))
     ? rpBranchTag
-    : autoBranch;
+    : autoBranch ?? (rpUtType ? "bugfix_ubuntu-mirror" : undefined);
 
   const rp = useReportPortalLaunch(effectiveBranchTag, rpUtType);
   const [open, setOpen] = useState(false);
@@ -107,11 +109,11 @@ export default function JenkinsJobCard({ title, jenkinsUrl, rpBranchTag, rpUtTyp
     return <NoJenkinsCard title={title} reason="No Jenkins URL configured" />;
   }
   if (loading && !job) {
-    return <SkeletonCard title={title} />;
+    return <SkeletonCard title={title} rp={rp} />;
   }
   if (!job && !error) {
     // No data yet (server hasn't been reachable) — show skeleton, not error
-    return <SkeletonCard title={title} />;
+    return <SkeletonCard title={title} rp={rp} />;
   }
   if (error || !job) {
     return (
@@ -120,6 +122,7 @@ export default function JenkinsJobCard({ title, jenkinsUrl, rpBranchTag, rpUtTyp
         jenkinsUrl={jenkinsUrl}
         error={error ?? "Job not found"}
         onRetry={refresh}
+        rp={rp}
       />
     );
   }
@@ -348,7 +351,7 @@ function Field({
   );
 }
 
-function SkeletonCard({ title }: { readonly title: string }) {
+function SkeletonCard({ title, rp }: { readonly title: string; readonly rp?: ReportPortalLaunchState }) {
   return (
     <div className="rounded border border-line bg-surface-1 px-4 py-3">
       <div className="flex items-center gap-2">
@@ -356,6 +359,7 @@ function SkeletonCard({ title }: { readonly title: string }) {
         <span className="text-[11px] text-ink-subtle">Loading…</span>
       </div>
       <div className="mt-3 h-2 w-full animate-pulse rounded bg-surface-2" />
+      {rp?.summary && <RPBadge summary={rp.summary} />}
     </div>
   );
 }
@@ -365,11 +369,13 @@ function ErrorCard({
   jenkinsUrl,
   error,
   onRetry,
+  rp,
 }: {
   readonly title: string;
   readonly jenkinsUrl: string;
   readonly error: string;
   readonly onRetry: () => void;
+  readonly rp?: ReportPortalLaunchState;
 }) {
   return (
     <div className="rounded border border-status-failed/40 bg-status-failed/5 px-4 py-3">
@@ -394,8 +400,9 @@ function ErrorCard({
       </div>
       <div className="mt-2 text-[11px] text-status-failed">{error}</div>
       <div className="mt-1 text-[10px] text-ink-subtle">
-        Dev tip: restart <code>npm run dev</code> after editing <code>.env.local</code>.
+        Jenkins server unreachable — RP report shown below if available.
       </div>
+      {rp?.summary && <RPBadge summary={rp.summary} />}
     </div>
   );
 }
