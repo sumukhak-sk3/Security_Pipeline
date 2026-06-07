@@ -47,13 +47,22 @@ function aggregate(items: LiveJobSummary[]): Omit<LiveWorkflowSummary, "loading"
   const done = items.filter((i) => i.status === "success").length;
   const running = items.filter((i) => i.status === "running").length;
   const failed = items.filter((i) => i.status === "failed").length;
-  const progress = Math.round(items.reduce((a, i) => a + i.progress, 0) / total);
+  // Unreachable: pending AND (has error, no URL configured, OR URL is set but no job data returned)
+  const unreachable = items.filter((i) => i.status === "pending" && (i.error || !i.jenkinsUrl || (i.jenkinsUrl && !i.job))).length;
+  // Genuinely pending: pending, reachable, has job data (meaning Jenkins responded but build hasn't started)
+  const genuinelyPending = items.filter((i) => i.status === "pending" && i.jenkinsUrl && i.job && !i.error).length;
+
+  const reachableTotal = total - unreachable;
+  const progress = reachableTotal > 0
+    ? Math.round(items.filter((i) => i.job != null).reduce((a, i) => a + i.progress, 0) / reachableTotal)
+    : 0;
 
   let status: Status = "pending";
   if (failed > 0) status = "failed";
   else if (running > 0) status = "running";
-  else if (done === total) status = "success";
-  else if (done > 0) status = "running";
+  else if (reachableTotal > 0 && done === reachableTotal) status = "success";
+  else if (done > 0 && genuinelyPending > 0) status = "running";
+  else if (done > 0 && genuinelyPending === 0) status = "success"; // all reachable jobs done, rest are unreachable
 
   return { status, progress, jobsTotal: items.length, jobsDone: done, jobsRunning: running, jobsFailed: failed };
 }

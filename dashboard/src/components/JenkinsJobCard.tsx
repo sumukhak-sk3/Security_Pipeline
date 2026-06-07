@@ -52,6 +52,7 @@ export default function JenkinsJobCard({ title, jenkinsUrl, rpBranchTag, rpUtTyp
     const id = jenkinsUrl.includes("Quick_UT") ? "e-quick-ut"
       : jenkinsUrl.includes("Slow_UT") ? "e-slow-ut"
       : jenkinsUrl.includes("CVE-BUILD") ? "e-nios-build"
+      : jenkinsUrl.includes("NIOS-CVE-Repo") ? "e-orchestrator"
       : jenkinsUrl.includes("NIOS-CVE-Analyser") ? "d-impact" : null;
 
     const tryCache = async () => {

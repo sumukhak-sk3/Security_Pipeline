@@ -13,9 +13,10 @@ interface JobSpec {
 
 const SPECS: Record<WorkflowKey, JobSpec[]> = {
   E: [
-    { id: "e-nios-build", title: "NIOS build" },
-    { id: "e-quick-ut",   title: "Quick UT" },
-    { id: "e-slow-ut",    title: "Slow UT" },
+    { id: "e-orchestrator", title: "NIOS-CVE-Repo (Orchestrator)" },
+    { id: "e-nios-build",   title: "NIOS Build" },
+    { id: "e-quick-ut",     title: "Quick UT" },
+    { id: "e-slow-ut",      title: "Slow UT" },
   ],
   B: [
     // Filled in once Workflow B Jenkins jobs are wired.

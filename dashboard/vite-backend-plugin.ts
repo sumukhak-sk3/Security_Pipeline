@@ -191,6 +191,7 @@ function buildConfig(env: Record<string, string>): PluginConfig {
 
   return {
     jenkinsJobs: [
+      { id: "e-orchestrator", url: env.VITE_JENKINS_JOB_E_ORCHESTRATOR ?? "", proxy: "inca" },
       { id: "e-nios-build", url: env.VITE_JENKINS_JOB_E_NIOS_BUILD ?? "", proxy: "inca" },
       { id: "e-quick-ut", url: env.VITE_JENKINS_JOB_E_QUICK_UT ?? "", proxy: "ut" },
       { id: "e-slow-ut", url: env.VITE_JENKINS_JOB_E_SLOW_UT ?? "", proxy: "ut" },
