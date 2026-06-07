@@ -30,6 +30,15 @@ export default function Overview() {
     workflows.reduce((acc, w) => acc + w.progress, 0) / workflows.length,
   );
 
+  // Derive overall pipeline status from live workflow statuses
+  const overallStatus = workflows.some((w) => w.status === "failed")
+    ? "failed"
+    : workflows.some((w) => w.status === "running")
+      ? "running"
+      : workflows.every((w) => w.status === "success")
+        ? "success"
+        : "pending";
+
   const activeJob = workflows.flatMap((w) => w.jobs).find((j) => j.status === "running");
 
   const liveActiveJobs = workflows
@@ -49,9 +58,9 @@ export default function Overview() {
           </div>
         </div>
         <div className="text-right">
-          <StatusPill status={run.status} />
+          <StatusPill status={overallStatus} />
           <div className="mt-2 w-60">
-            <ProgressBar value={totalProgress} status={run.status} showLabel />
+            <ProgressBar value={totalProgress} status={overallStatus} showLabel />
           </div>
           <div className="mt-1 text-[11px] text-ink-subtle">
             Started {formatTime(run.startedAt)}

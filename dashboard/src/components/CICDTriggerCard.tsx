@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { toProxyUrl } from "../api/jenkinsClient";
+import { fetchCachedJenkinsJob } from "../api/cachedClient";
+import { awaitPrefetch } from "../api/prefetch";
 import StatusPill from "./StatusPill";
 import { cn } from "../lib/cn";
 
@@ -14,9 +16,13 @@ interface TriggerState {
 /**
  * CICD Trigger Card — triggers the QA2 Jenkins pipeline with a branch parameter
  * and streams the console output live.
+ *
+ * Auto-detects the branch from CVE-BUILD's BUILD_PATH param so the user doesn't
+ * have to re-type it. Falls back to today's date-based branch if unavailable.
  */
 export default function CICDTriggerCard() {
   const [branch, setBranch] = useState("");
+  const [detectedBranch, setDetectedBranch] = useState<string | null>(null);
   const [state, setState] = useState<TriggerState>({ status: "idle", buildNumber: null, error: null });
   const [consoleLines, setConsoleLines] = useState<string[]>([]);
   const [consoleOpen, setConsoleOpen] = useState(false);
@@ -25,7 +31,30 @@ export default function CICDTriggerCard() {
 
   const proxyBase = toProxyUrl(CICD_JOB_URL);
   const today = new Date().toISOString().slice(0, 10);
-  const defaultBranch = `bugfix/ubuntu-mirror-${today}`;
+  const fallbackBranch = `bugfix/ubuntu-mirror-${today}`;
+
+  // Auto-detect the branch from the latest CVE-BUILD's BUILD_PATH param
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        // Try prefetch cache first (instant)
+        const pre = await awaitPrefetch();
+        const cached = pre?.jenkins?.jobs?.["e-nios-build"];
+        const buildPath = cached?.buildParams?.BUILD_PATH
+          ?? (await fetchCachedJenkinsJob("e-nios-build"))?.buildParams?.BUILD_PATH;
+        if (cancelled) return;
+        if (buildPath) {
+          // BUILD_PATH is like "origin/bugfix/ubuntu-mirror-2026-06-02" → strip "origin/"
+          const clean = buildPath.replace(/^origin\//, "");
+          setDetectedBranch(clean);
+        }
+      } catch { /* ignore — fallback to date-based default */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const defaultBranch = detectedBranch || fallbackBranch;
 
   // Auto-scroll console
   useEffect(() => {
@@ -216,7 +245,12 @@ export default function CICDTriggerCard() {
 
       {/* Default branch hint */}
       <div className="mt-1.5 text-[10px] text-ink-subtle">
-        Default: <code className="rounded bg-surface-2 px-1">{defaultBranch}</code> · Target: <code className="rounded bg-surface-2 px-1">jenkins-qa2 / IB_QA_CI_NIOS_CVE_Analyser</code>
+        {detectedBranch ? (
+          <>Auto-detected from CVE-BUILD: <code className="rounded bg-surface-2 px-1">{detectedBranch}</code></>
+        ) : (
+          <>Default: <code className="rounded bg-surface-2 px-1">{fallbackBranch}</code></>
+        )}
+        {" · "}Target: <code className="rounded bg-surface-2 px-1">jenkins-qa2 / IB_QA_CI_NIOS_CVE_Analyser</code>
       </div>
 
       {/* Error */}
