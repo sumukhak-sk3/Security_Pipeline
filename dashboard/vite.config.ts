@@ -43,16 +43,18 @@ export default defineConfig(({ mode }) => {
       ? `${env.QA2_JENKINS_USER}:${env.QA2_JENKINS_API_TOKEN}`
       : incaAuth;
   const rpToken = env.RP_BEARER_KEY ?? "";
+  const dtrackToken = env.DTRACK_API_KEY ?? "";
 
   // Boot log so missing tokens are obvious in the terminal.
   // eslint-disable-next-line no-console
   console.log(
-    "[vite proxy] jenkins auth →",
+    "[vite proxy] jenkins auth \u2192",
     `inca=${incaAuth ? "set" : "MISSING"}`,
     `ut=${utAuth ? "set" : "MISSING"}`,
     `impact=${impactAuth ? "set" : "MISSING"}`,
     `qa2=${qa2Auth ? "set" : "MISSING"}`,
     `rp=${rpToken ? "set" : "MISSING"}`,
+    `dtrack=${dtrackToken ? "set" : "MISSING"}`,
   );
 
   const stripBasicChallenge: ProxyOptions["configure"] = (proxy) => {
@@ -119,6 +121,23 @@ export default defineConfig(({ mode }) => {
             proxy.on("error", (err) => {
               // eslint-disable-next-line no-console
               console.error("[vite proxy] RP upstream error:", err.message);
+            });
+          },
+        },
+        "/_dtrack": {
+          target: "http://54.215.67.129:8081",
+          changeOrigin: true,
+          secure: false,
+          rewrite: (p) => p.replace(/^\/_dtrack/, ""),
+          configure: (proxy) => {
+            proxy.on("proxyReq", (proxyReq) => {
+              if (dtrackToken) {
+                proxyReq.setHeader("X-Api-Key", dtrackToken);
+              }
+            });
+            proxy.on("error", (err) => {
+              // eslint-disable-next-line no-console
+              console.error("[vite proxy] DTrack upstream error:", err.message);
             });
           },
         },

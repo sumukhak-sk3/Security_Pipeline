@@ -6,6 +6,7 @@ import StatusPill from "../components/StatusPill";
 import ProgressBar from "../components/ProgressBar";
 import ConsoleDrawer from "../components/ConsoleDrawer";
 import ImpactLivePanel from "../components/ImpactLivePanel";
+import SBOMPanel from "../components/SBOMPanel";
 import JenkinsJobCard from "../components/JenkinsJobCard";
 import type { Job, WorkflowId } from "../types";
 import { workflowShortName } from "../workflows";
@@ -28,6 +29,7 @@ export default function WorkflowPage() {
 
   const isImpact = wfId === "D";
   const isBuild = wfId === "E";
+  const isSBOM = wfId === "B";
   const isLive = isImpact || isBuild;
 
   // Hooks MUST be unconditional — compute spec list before any early return.
@@ -101,6 +103,9 @@ export default function WorkflowPage() {
       </section>
 
       {isImpact && <ImpactLivePanel />}
+
+      {/* SBOM (B) runs in parallel — always show its own live state */}
+      {isSBOM && <SBOMPanel />}
 
       {isBuild && <TriggerPanel onBranchChange={setRpBranch} />}
 

@@ -21,7 +21,6 @@ interface TriggerState {
  * have to re-type it. Falls back to today's date-based branch if unavailable.
  */
 export default function CICDTriggerCard() {
-  const [branch, setBranch] = useState("");
   const [detectedBranch, setDetectedBranch] = useState<string | null>(null);
   const [state, setState] = useState<TriggerState>({ status: "idle", buildNumber: null, error: null });
   const [consoleLines, setConsoleLines] = useState<string[]>([]);
@@ -69,7 +68,7 @@ export default function CICDTriggerCard() {
   }, []);
 
   async function handleTrigger() {
-    const effectiveBranch = branch.trim() || defaultBranch;
+    const effectiveBranch = defaultBranch;
     setState({ status: "triggering", buildNumber: null, error: null });
     setConsoleLines([]);
     setConsoleOpen(true);
@@ -207,25 +206,12 @@ export default function CICDTriggerCard() {
       </div>
 
       <p className="mt-1 text-[11px] text-ink-muted">
-        Triggers <code className="rounded bg-surface-2 px-1">IB_QA_CI_NIOS_CVE_Analyser</code> on jenkins-qa2.
-        Pass a branch name or leave blank for the default.
+        Triggers <code className="rounded bg-surface-2 px-1">IB_QA_CI_NIOS_CVE_Analyser</code> on jenkins-qa2
+        using the auto-detected branch.
       </p>
 
-      {/* Input + Buttons */}
-      <div className="mt-3 flex items-end gap-3">
-        <div className="flex-1">
-          <label className="text-[10px] font-semibold uppercase tracking-wider text-ink-subtle">
-            Branch (optional)
-          </label>
-          <input
-            type="text"
-            value={branch}
-            onChange={(e) => setBranch(e.target.value)}
-            placeholder={defaultBranch}
-            disabled={state.status === "triggering" || state.status === "running"}
-            className="mt-1 w-full rounded border border-line bg-surface-0 px-2.5 py-1.5 text-sm text-ink placeholder:text-ink-subtle focus:border-accent focus:outline-none disabled:opacity-50"
-          />
-        </div>
+      {/* Buttons */}
+      <div className="mt-3 flex items-center gap-3">
         <button
           onClick={handleTestConnection}
           disabled={state.status === "triggering" || state.status === "running"}
@@ -242,15 +228,17 @@ export default function CICDTriggerCard() {
         </button>
       </div>
 
-      {/* Default branch hint */}
-      <div className="mt-1.5 text-[10px] text-ink-subtle">
-        {detectedBranch ? (
-          <>Auto-detected from CVE-BUILD: <code className="rounded bg-surface-2 px-1">{detectedBranch}</code></>
-        ) : (
-          <>Default: <code className="rounded bg-surface-2 px-1">{fallbackBranch}</code></>
-        )}
-        {" · "}Target: <code className="rounded bg-surface-2 px-1">jenkins-qa2 / IB_QA_CI_NIOS_CVE_Analyser</code>
-      </div>
+      {/* Branch hint — only shown after triggering */}
+      {state.status !== "idle" && (
+        <div className="mt-1.5 text-[10px] text-ink-subtle">
+          {detectedBranch ? (
+            <>Auto-detected from CVE-BUILD: <code className="rounded bg-surface-2 px-1">{detectedBranch}</code></>
+          ) : (
+            <>Default: <code className="rounded bg-surface-2 px-1">{fallbackBranch}</code></>
+          )}
+          {" · "}Target: <code className="rounded bg-surface-2 px-1">jenkins-qa2 / IB_QA_CI_NIOS_CVE_Analyser</code>
+        </div>
+      )}
 
       {/* Error */}
       {state.error && (

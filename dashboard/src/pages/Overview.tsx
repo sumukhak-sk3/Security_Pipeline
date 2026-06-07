@@ -45,6 +45,7 @@ export default function Overview() {
   }, []);
 
   // Replace E + D with live aggregated state; B keeps mock data for now.
+  // Each workflow independently shows its own live state.
   const workflows: Workflow[] = run.workflows.map((w) => {
     if (w.id === "E") return mergeLive(w, liveE);
     if (w.id === "D") return mergeLive(w, liveD);
@@ -164,24 +165,31 @@ function mergeLive(
   live: ReturnType<typeof useWorkflowLiveSummary>,
 ): Workflow {
   const hasAny = live.jobs.some((j) => j.job != null);
+  const anyRunning = live.jobsRunning > 0;
+
   return {
     ...w,
     status: live.loading && !hasAny ? "pending" : live.status,
     progress: live.progress,
-    jobs: live.jobs.map((j) => ({
-      id: j.id,
-      workflowId: w.id,
-      name: j.title,
-      status: j.status,
-      progress: j.progress,
-      buildNumber: j.headline?.number,
-      jenkinsUrl: j.jenkinsUrl,
-      startedAt: j.headline ? new Date(j.headline.timestamp).toISOString() : undefined,
-      finishedAt:
-        j.headline && !j.headline.building
-          ? new Date(j.headline.timestamp + j.headline.duration).toISOString()
-          : undefined,
-      steps: [],
-    })),
+    jobs: live.jobs.map((j) => {
+      // If any job in this workflow is building, non-running jobs show pending
+      // (no historical data during an active run).
+      const showPending = anyRunning && j.status !== "running";
+      return {
+        id: j.id,
+        workflowId: w.id,
+        name: j.title,
+        status: showPending ? "pending" as const : j.status,
+        progress: showPending ? 0 : j.progress,
+        buildNumber: j.headline?.number,
+        jenkinsUrl: j.jenkinsUrl,
+        startedAt: j.headline ? new Date(j.headline.timestamp).toISOString() : undefined,
+        finishedAt:
+          j.headline && !j.headline.building
+            ? new Date(j.headline.timestamp + j.headline.duration).toISOString()
+            : undefined,
+        steps: [],
+      };
+    }),
   };
 }
