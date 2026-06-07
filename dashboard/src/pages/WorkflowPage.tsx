@@ -8,6 +8,7 @@ import ConsoleDrawer from "../components/ConsoleDrawer";
 import ImpactLivePanel from "../components/ImpactLivePanel";
 import SBOMPanel from "../components/SBOMPanel";
 import JenkinsJobCard from "../components/JenkinsJobCard";
+import WaitingJobCard from "../components/WaitingJobCard";
 import type { Job, WorkflowId } from "../types";
 import { workflowShortName } from "../workflows";
 import { config } from "../config";
@@ -110,35 +111,11 @@ export default function WorkflowPage() {
       {isBuild && <TriggerPanel onBranchChange={setRpBranch} />}
 
       {isLive ? (
-        <section className="space-y-3">
-          <div className="flex items-baseline justify-between">
-            <h2 className="text-sm font-semibold">Jenkins jobs</h2>
-            <span className="text-[11px] text-ink-subtle">
-              Live data · auto-refresh every {Math.round(config.api.pollIntervalMs / 1000)}s
-            </span>
-          </div>
-          <div className="space-y-3">
-            {liveSpecs.map((j) => (
-              <JenkinsJobCard
-                key={j.id}
-                title={j.title}
-                jenkinsUrl={j.jenkinsUrl}
-                rpBranchTag={
-                  (j.id === "e-quick-ut" || j.id === "e-slow-ut")
-                    ? (rpBranch.trim()
-                        ? rpBranch.trim().replace(/\//g, "_")
-                        : "bugfix_ubuntu-mirror")
-                    : undefined
-                }
-                rpUtType={
-                  j.id === "e-quick-ut" ? "quick"
-                    : j.id === "e-slow-ut" ? "slow"
-                    : undefined
-                }
-              />
-            ))}
-          </div>
-        </section>
+        <LiveJobsSection
+          liveSpecs={liveSpecs}
+          live={live}
+          rpBranch={rpBranch}
+        />
       ) : (
         <section className="space-y-3">
           <h2 className="text-sm font-semibold">Jobs</h2>
@@ -152,6 +129,128 @@ export default function WorkflowPage() {
 
       <ConsoleDrawer runId={currentRun.id} job={openJob} onClose={() => setOpenJob(null)} />
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Live Jobs Section — pipeline-aware rendering                        */
+/* Shows WaitingJobCard for downstream jobs when upstream is running   */
+/* ------------------------------------------------------------------ */
+
+import type { ResolvedJobSpec } from "../workflowJobs";
+import type { LiveWorkflowSummary } from "../hooks/useWorkflowLiveSummary";
+
+function LiveJobsSection({
+  liveSpecs,
+  live,
+  rpBranch,
+}: {
+  liveSpecs: ResolvedJobSpec[];
+  live: LiveWorkflowSummary;
+  rpBranch: string;
+}) {
+  // Is any job in the pipeline currently building?
+  const anyBuilding = live.jobs.some(
+    (j) => j.headline?.building === true,
+  );
+
+  // Build a lookup: jobId → live summary
+  const jobById = Object.fromEntries(live.jobs.map((j) => [j.id, j]));
+
+  // Build a lookup: jobId → spec (for dependsOn info)
+  const specById = Object.fromEntries(liveSpecs.map((s) => [s.id, s]));
+
+  // Determine if a downstream job should show "waiting" state:
+  // - Pipeline is actively running (anyBuilding)
+  // - This job's upstream dependency is still running or pending
+  // - This job itself has NOT started in the current run (not building, no result)
+  function isWaiting(spec: ResolvedJobSpec): boolean {
+    if (!anyBuilding) return false;
+    if (!spec.dependsOn) return false;
+
+    const thisJob = jobById[spec.id];
+    const upstream = jobById[spec.dependsOn];
+
+    // If this job is already building or has a result, it's not waiting
+    if (thisJob?.headline?.building) return false;
+
+    // If upstream is still building, this job is waiting
+    if (upstream?.headline?.building) return true;
+
+    // If upstream finished successfully but this job hasn't started its
+    // current run yet (its lastBuild timestamp is older than the upstream's),
+    // it's waiting for Jenkins to pick it up
+    if (upstream?.headline && thisJob?.headline) {
+      const upstreamStart = upstream.headline.timestamp;
+      const thisStart = thisJob.headline.timestamp;
+      // If this job's last build started BEFORE the current upstream run, it's stale
+      if (thisStart < upstreamStart && !thisJob.headline.building) return true;
+    }
+
+    // If upstream is building and this job has no data at all, it's waiting
+    if (!thisJob?.headline && upstream?.headline?.building) return true;
+
+    return false;
+  }
+
+  // Get the title of the upstream dependency
+  function upstreamTitle(spec: ResolvedJobSpec): string {
+    if (!spec.dependsOn) return "";
+    return specById[spec.dependsOn]?.title ?? spec.dependsOn;
+  }
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-baseline justify-between">
+        <h2 className="text-sm font-semibold">
+          Jenkins jobs
+          {anyBuilding && (
+            <span className="ml-2 inline-flex items-center gap-1 text-[11px] font-normal text-amber-600 dark:text-amber-400">
+              <span className="relative flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-500" />
+              </span>
+              Pipeline in progress
+            </span>
+          )}
+        </h2>
+        <span className="text-[11px] text-ink-subtle">
+          Live data · auto-refresh every {Math.round(config.api.pollIntervalMs / 1000)}s
+        </span>
+      </div>
+      <div className="space-y-3">
+        {liveSpecs.map((j, idx) =>
+          isWaiting(j) ? (
+            <WaitingJobCard
+              key={j.id}
+              title={j.title}
+              waitingFor={upstreamTitle(j)}
+              description={j.waitDescription}
+              step={idx + 1}
+              totalSteps={liveSpecs.length}
+            />
+          ) : (
+            <JenkinsJobCard
+              key={j.id}
+              title={j.title}
+              jenkinsUrl={j.jenkinsUrl}
+              rpBranchTag={
+                (j.id === "e-quick-ut" || j.id === "e-slow-ut")
+                  ? (rpBranch.trim()
+                      ? rpBranch.trim().replace(/\//g, "_")
+                      : "bugfix_ubuntu-mirror")
+                  : undefined
+              }
+              rpUtType={
+                j.id === "e-quick-ut" ? "quick"
+                  : j.id === "e-slow-ut" ? "slow"
+                  : undefined
+              }
+            />
+          ),
+        )}
+      </div>
+    </section>
   );
 }
 

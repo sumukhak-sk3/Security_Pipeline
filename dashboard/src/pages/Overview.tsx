@@ -7,6 +7,7 @@ import PRStatusCard from "../components/PRStatusCard";
 import StatusPill from "../components/StatusPill";
 import ProgressBar from "../components/ProgressBar";
 import ConsoleDrawer from "../components/ConsoleDrawer";
+import WaitingJobCard from "../components/WaitingJobCard";
 import type { Job, Workflow } from "../types";
 import { formatTime, relTime } from "../lib/format";
 import { useWorkflowLiveSummary } from "../hooks/useWorkflowLiveSummary";
@@ -19,7 +20,8 @@ export default function Overview() {
   const [liveBranch, setLiveBranch] = useState<string | null>(null);
   const [liveTriggeredBy, setLiveTriggeredBy] = useState<string | null>(null);
 
-  const liveE = useWorkflowLiveSummary(useMemo(() => workflowJobSpecs("E"), []));
+  const eSpecs = useMemo(() => workflowJobSpecs("E"), []);
+  const liveE = useWorkflowLiveSummary(eSpecs);
   const liveD = useWorkflowLiveSummary(useMemo(() => workflowJobSpecs("D"), []));
 
   // Fetch branch + trigger info from cached build params (re-runs when live data updates)
@@ -50,16 +52,43 @@ export default function Overview() {
     return w;
   });
 
-  const totalProgress = Math.round(
-    workflows.reduce((acc, w) => acc + w.progress, 0) / workflows.length,
-  );
+  // Only use live workflows (E + D) for the overall bar — B is still mock data
+  const liveWorkflows = workflows.filter((w) => w.id === "E" || w.id === "D");
 
-  // Derive overall pipeline status from live workflow statuses
-  const overallStatus = workflows.some((w) => w.status === "failed")
+  // Pipeline-aware progress: when E is actively running, D hasn't been
+  // triggered yet in this run — its stale historical 100% shouldn't inflate
+  // the overall bar.  We check if D's latest build predates the current
+  // orchestrator run; if so it contributes 0%.
+  const eAnyBuilding = liveE.jobs.some((j) => j.headline?.building === true);
+  const pipelineStartTs =
+    liveE.jobs.find((j) => j.id === "e-orchestrator")?.headline?.timestamp ?? 0;
+
+  /** Is workflow D stale (not yet triggered in the current pipeline run)? */
+  const dIsStale = (() => {
+    if (!eAnyBuilding || pipelineStartTs === 0) return false;
+    // If D itself is building, it's clearly current
+    if (liveD.jobs.some((j) => j.headline?.building)) return false;
+    // Compare D's latest build timestamp to pipeline start
+    const dLatest = Math.max(...liveD.jobs.map((j) => j.headline?.timestamp ?? 0));
+    return dLatest < pipelineStartTs;
+  })();
+
+  const totalProgress = (() => {
+    if (liveWorkflows.length === 0) return 0;
+    const adjusted = liveWorkflows.map((w) => {
+      if (w.id === "D" && dIsStale) return 0;
+      return w.progress;
+    });
+    return Math.round(adjusted.reduce((a, p) => a + p, 0) / adjusted.length);
+  })();
+
+  // Derive overall pipeline status from live workflow statuses only
+  // When D is stale, treat it as "pending" so it doesn't falsely show success
+  const overallStatus = liveWorkflows.some((w) => w.status === "failed")
     ? "failed"
-    : workflows.some((w) => w.status === "running")
+    : liveWorkflows.some((w) => w.status === "running")
       ? "running"
-      : workflows.every((w) => w.status === "success")
+      : liveWorkflows.every((w) => w.id === "D" ? !dIsStale && w.status === "success" : w.status === "success")
         ? "success"
         : "pending";
 
@@ -68,6 +97,30 @@ export default function Overview() {
   const liveActiveJobs = workflows
     .filter((w) => w.id === "E" || w.id === "D")
     .flatMap((w) => w.jobs.filter((j) => j.status === "running" || j.status === "failed"));
+  const eJobById = useMemo(
+    () => Object.fromEntries(liveE.jobs.map((j) => [j.id, j])),
+    [liveE.jobs],
+  );
+  const eSpecById = useMemo(
+    () => Object.fromEntries(eSpecs.map((s) => [s.id, s])),
+    [eSpecs],
+  );
+  const waitingEJobs = useMemo(() => {
+    if (!eAnyBuilding) return [];
+    return eSpecs.filter((spec) => {
+      if (!spec.dependsOn) return false;
+      const thisJob = eJobById[spec.id];
+      const upstream = eJobById[spec.dependsOn];
+      if (thisJob?.headline?.building) return false;
+      if (upstream?.headline?.building) return true;
+      if (upstream?.headline && thisJob?.headline) {
+        if (thisJob.headline.timestamp < upstream.headline.timestamp && !thisJob.headline.building)
+          return true;
+      }
+      if (!thisJob?.headline && upstream?.headline?.building) return true;
+      return false;
+    });
+  }, [eAnyBuilding, eSpecs, eJobById]);
 
   // Derive live metadata from the orchestrator/CVE-BUILD headline build
   const orchestratorJob = liveE.jobs.find((j) => j.id === "e-orchestrator");
@@ -140,6 +193,16 @@ export default function Overview() {
             {liveActiveJobs.map((j) => (
               <JobCard key={`live-${j.workflowId}-${j.id}`} job={j} onOpenConsole={setOpenJob} />
             ))}
+            {waitingEJobs.map((spec) => (
+              <WaitingJobCard
+                key={`wait-${spec.id}`}
+                title={spec.title}
+                waitingFor={eSpecById[spec.dependsOn!]?.title ?? spec.dependsOn!}
+                description={spec.waitDescription}
+                step={eSpecs.indexOf(spec) + 1}
+                totalSteps={eSpecs.length}
+              />
+            ))}
             {workflows
               .filter((w) => w.id === "B")
               .flatMap((w) =>
@@ -150,7 +213,7 @@ export default function Overview() {
                     <JobCard key={`${w.id}-${j.id}`} job={j} onOpenConsole={setOpenJob} />
                   )),
               )}
-            {liveActiveJobs.length === 0 && (
+            {liveActiveJobs.length === 0 && waitingEJobs.length === 0 && (
               <div className="rounded border border-dashed border-line bg-surface-1 px-4 py-6 text-center text-xs text-ink-subtle">
                 No live jobs running for Build &amp; Unit Tests or Impact Analysis.
                 Open a workflow page to see its latest build details.

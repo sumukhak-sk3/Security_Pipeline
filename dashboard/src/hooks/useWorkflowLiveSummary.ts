@@ -53,9 +53,37 @@ function aggregate(items: LiveJobSummary[]): Omit<LiveWorkflowSummary, "loading"
   const genuinelyPending = items.filter((i) => i.status === "pending" && i.jenkinsUrl && i.job && !i.error).length;
 
   const reachableTotal = total - unreachable;
-  const progress = reachableTotal > 0
-    ? Math.round(items.filter((i) => i.job != null).reduce((a, i) => a + i.progress, 0) / reachableTotal)
-    : 0;
+
+  // Check if any job is currently building → pipeline is in progress
+  const anyBuilding = items.some((i) => i.headline?.building === true);
+
+  // Progress calculation:
+  // - When a pipeline is actively running, downstream jobs that haven't started
+  //   in the current run should contribute 0% (not their historical 100%).
+  // - When nothing is running, show the aggregate of last completed builds.
+  let progress: number;
+  if (anyBuilding && reachableTotal > 0) {
+    // Find the earliest "building" timestamp to identify the current run
+    const currentRunStart = Math.min(
+      ...items.filter((i) => i.headline?.building).map((i) => i.headline!.timestamp),
+    );
+    // For each reachable job: if its last build started before the current run
+    // and it's not currently building, it's a stale result → count as 0%
+    const jobProgress = items
+      .filter((i) => i.job != null)
+      .map((i) => {
+        if (i.headline?.building) return i.progress; // actively building → use real progress
+        if (i.headline && i.headline.timestamp >= currentRunStart) return i.progress; // completed in current run
+        return 0; // stale (previous run) or not started → 0%
+      });
+    progress = Math.round(jobProgress.reduce((a, p) => a + p, 0) / reachableTotal);
+  } else if (reachableTotal > 0) {
+    progress = Math.round(
+      items.filter((i) => i.job != null).reduce((a, i) => a + i.progress, 0) / reachableTotal,
+    );
+  } else {
+    progress = 0;
+  }
 
   let status: Status = "pending";
   if (failed > 0) status = "failed";
