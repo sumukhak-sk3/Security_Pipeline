@@ -56,18 +56,25 @@ export async function triggerWorkflowE(opts?: {
     }
   }
 
-  // Real trigger: POST to /buildWithParameters with branch param
-  const endpoint = `${proxyBase}/buildWithParameters`;
-  const params = new URLSearchParams();
-  if (branch) {
-    params.set("OVERRIDE_BRANCH", branch);
-  }
-
+  // Real trigger: POST to /build with branch param as query string
+  // Note: /build with query params works with API token auth without needing a CSRF crumb.
+  // /buildWithParameters requires a session-bound crumb which is tricky through a proxy.
   try {
+    const queryParams = new URLSearchParams();
+    queryParams.set("delay", "0sec");
+
+    let endpoint: string;
+    if (branch) {
+      // Use /buildWithParameters when we have params, passed as query string
+      queryParams.set("OVERRIDE_BRANCH", branch);
+      endpoint = `${proxyBase}/buildWithParameters?${queryParams.toString()}`;
+    } else {
+      // No params — use /build
+      endpoint = `${proxyBase}/build?${queryParams.toString()}`;
+    }
+
     const res = await fetch(endpoint, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: params.toString(),
     });
 
     // A successful trigger returns 201 with a Location header

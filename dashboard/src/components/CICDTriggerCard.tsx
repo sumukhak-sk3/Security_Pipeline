@@ -75,14 +75,13 @@ export default function CICDTriggerCard() {
     setConsoleOpen(true);
 
     try {
-      // Trigger buildWithParameters
-      const params = new URLSearchParams();
-      params.set("BRANCH", effectiveBranch);
+      // Trigger with params as query string (works with API token auth, no CSRF crumb needed)
+      const queryParams = new URLSearchParams();
+      queryParams.set("BRANCH", effectiveBranch);
+      queryParams.set("delay", "0sec");
 
-      const res = await fetch(`${proxyBase}/buildWithParameters`, {
+      const res = await fetch(`${proxyBase}/buildWithParameters?${queryParams.toString()}`, {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: params.toString(),
       });
 
       if (!res.ok && res.status !== 201) {

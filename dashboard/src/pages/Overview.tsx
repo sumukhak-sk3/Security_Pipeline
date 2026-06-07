@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { currentRun } from "../mock/data";
 import WorkflowFlow from "../components/WorkflowFlow";
 import JobCard from "../components/JobCard";
@@ -11,13 +11,38 @@ import type { Job, Workflow } from "../types";
 import { formatTime, relTime } from "../lib/format";
 import { useWorkflowLiveSummary } from "../hooks/useWorkflowLiveSummary";
 import { workflowJobSpecs } from "../workflowJobs";
+import { awaitPrefetch } from "../api/prefetch";
 
 export default function Overview() {
   const run = currentRun;
   const [openJob, setOpenJob] = useState<Job | null>(null);
+  const [liveBranch, setLiveBranch] = useState<string | null>(null);
+  const [liveTriggeredBy, setLiveTriggeredBy] = useState<string | null>(null);
 
   const liveE = useWorkflowLiveSummary(useMemo(() => workflowJobSpecs("E"), []));
   const liveD = useWorkflowLiveSummary(useMemo(() => workflowJobSpecs("D"), []));
+
+  // Fetch branch + trigger info from cached build params
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const pre = await awaitPrefetch();
+        if (cancelled) return;
+        const niosBuild = pre?.jenkins?.jobs?.["e-nios-build"];
+        if (niosBuild?.buildParams?.BUILD_PATH) {
+          // BUILD_PATH = "origin/bugfix/ubuntu-mirror-2026-06-02" → strip "origin/"
+          setLiveBranch(niosBuild.buildParams.BUILD_PATH.replace(/^origin\//, ""));
+        }
+        if (niosBuild?.buildParams?.EMAIL_LIST) {
+          // Use the email prefix as "triggered by"
+          const email = niosBuild.buildParams.EMAIL_LIST;
+          setLiveTriggeredBy(email.split("@")[0]);
+        }
+      } catch { /* fallback to mock */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   // Replace E + D with live aggregated state; B keeps mock data for now.
   const workflows: Workflow[] = run.workflows.map((w) => {
@@ -45,6 +70,20 @@ export default function Overview() {
     .filter((w) => w.id === "E" || w.id === "D")
     .flatMap((w) => w.jobs.filter((j) => j.status === "running" || j.status === "failed"));
 
+  // Derive live metadata from the orchestrator/CVE-BUILD headline build
+  const orchestratorJob = liveE.jobs.find((j) => j.id === "e-orchestrator");
+  const niosBuildJob = liveE.jobs.find((j) => j.id === "e-nios-build");
+
+  // Use latest orchestrator build start time as the pipeline start
+  const liveStartedAt = orchestratorJob?.headline
+    ? new Date(orchestratorJob.headline.timestamp).toISOString()
+    : run.startedAt;
+
+  // Build number as the run ID
+  const liveRunId = orchestratorJob?.headline
+    ? `NIOS-CVE-Repo #${orchestratorJob.headline.number}`
+    : run.id;
+
   return (
     <div className="space-y-6">
       <section className="flex items-end justify-between">
@@ -52,9 +91,16 @@ export default function Overview() {
           <div className="text-[11px] font-semibold uppercase tracking-wider text-ink-subtle">
             Pipeline run
           </div>
-          <h1 className="mt-1 text-2xl font-semibold tracking-tight">{run.id}</h1>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight">{liveRunId}</h1>
           <div className="mt-1 text-sm text-ink-muted">
-            {run.branch} · triggered {relTime(run.startedAt)} by {run.triggeredBy}
+            {liveBranch && (
+              <span className="font-mono text-xs">{liveBranch}</span>
+            )}
+            {liveBranch && " · "}
+            {liveTriggeredBy
+              ? <>triggered by {liveTriggeredBy}</>
+              : <>started {relTime(liveStartedAt)}</>
+            }
           </div>
         </div>
         <div className="text-right">
@@ -63,7 +109,7 @@ export default function Overview() {
             <ProgressBar value={totalProgress} status={overallStatus} showLabel />
           </div>
           <div className="mt-1 text-[11px] text-ink-subtle">
-            Started {formatTime(run.startedAt)}
+            Started {formatTime(liveStartedAt)}
           </div>
         </div>
       </section>
