@@ -22,7 +22,7 @@ export default function Overview() {
   const liveE = useWorkflowLiveSummary(useMemo(() => workflowJobSpecs("E"), []));
   const liveD = useWorkflowLiveSummary(useMemo(() => workflowJobSpecs("D"), []));
 
-  // Fetch branch + trigger info from cached build params
+  // Fetch branch + trigger info from cached build params (re-runs when live data updates)
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -31,18 +31,16 @@ export default function Overview() {
         if (cancelled) return;
         const niosBuild = pre?.jenkins?.jobs?.["e-nios-build"];
         if (niosBuild?.buildParams?.BUILD_PATH) {
-          // BUILD_PATH = "origin/bugfix/ubuntu-mirror-2026-06-02" → strip "origin/"
           setLiveBranch(niosBuild.buildParams.BUILD_PATH.replace(/^origin\//, ""));
         }
         if (niosBuild?.buildParams?.EMAIL_LIST) {
-          // Use the email prefix as "triggered by"
           const email = niosBuild.buildParams.EMAIL_LIST;
           setLiveTriggeredBy(email.split("@")[0]);
         }
       } catch { /* fallback to mock */ }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [liveE.status]);
 
   // Replace E + D with live aggregated state; B keeps mock data for now.
   // Each workflow independently shows its own live state.
@@ -89,8 +87,16 @@ export default function Overview() {
     <div className="space-y-6">
       <section className="flex items-end justify-between">
         <div>
-          <div className="text-[11px] font-semibold uppercase tracking-wider text-ink-subtle">
-            Pipeline run
+          <div className="flex items-center gap-2">
+            <div className="text-[11px] font-semibold uppercase tracking-wider text-ink-subtle">
+              Pipeline run
+            </div>
+            {overallStatus === "running" && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-status-running/10 px-2 py-0.5 text-[10px] font-semibold text-status-running">
+                <span className="h-1.5 w-1.5 rounded-full bg-status-running animate-pulse" />
+                LIVE
+              </span>
+            )}
           </div>
           <h1 className="mt-1 text-2xl font-semibold tracking-tight">{liveRunId}</h1>
           <div className="mt-1 text-sm text-ink-muted">
@@ -103,6 +109,11 @@ export default function Overview() {
               : <>started {relTime(liveStartedAt)}</>
             }
           </div>
+          {overallStatus === "running" && activeJob && (
+            <div className="mt-1 text-[11px] text-status-running">
+              Currently running: <span className="font-medium">{activeJob.name}</span>
+            </div>
+          )}
         </div>
         <div className="text-right">
           <StatusPill status={overallStatus} />
