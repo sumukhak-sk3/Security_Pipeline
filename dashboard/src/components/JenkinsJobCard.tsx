@@ -39,9 +39,15 @@ interface JobProps {
   readonly rpUtType?: "quick" | "slow";
   /** When provided, replaces the recent-builds history section in the expanded view. */
   readonly historyOverride?: React.ReactNode;
+  /**
+   * When true, the headline build resolves to `lastSuccessfulBuild` if the
+   * most recent completed build failed/was aborted and nothing is currently
+   * running. Recent builds list still shows the real chronological history.
+   */
+  readonly preferLastSuccessful?: boolean;
 }
 
-export default function JenkinsJobCard({ title, jenkinsUrl, rpBranchTag, rpUtType, historyOverride }: JobProps) {
+export default function JenkinsJobCard({ title, jenkinsUrl, rpBranchTag, rpUtType, historyOverride, preferLastSuccessful }: JobProps) {
   const { loading, job, stages, artifacts, artifactsBuildNumber, error, refresh } = useJenkinsJob(jenkinsUrl);
   const [autoBranch, setAutoBranch] = useState<string | undefined>();
   const [buildParams, setBuildParams] = useState<Record<string, string>>({});
@@ -131,8 +137,19 @@ export default function JenkinsJobCard({ title, jenkinsUrl, rpBranchTag, rpUtTyp
     );
   }
 
-  const headline: JenkinsBuild | null =
+  const liveHeadline: JenkinsBuild | null =
     job.lastBuild?.building ? job.lastBuild : job.lastCompletedBuild;
+  // When the caller prefers the last successful build (e.g. CICD overview),
+  // and the latest completed build did NOT succeed and nothing is running,
+  // surface the last green build instead so the card reflects a healthy state.
+  const latestFailed =
+    liveHeadline != null &&
+    !liveHeadline.building &&
+    liveHeadline.result !== "SUCCESS";
+  const headline: JenkinsBuild | null =
+    preferLastSuccessful && latestFailed && job.lastSuccessfulBuild
+      ? job.lastSuccessfulBuild
+      : liveHeadline;
   const isRunning = !!headline?.building;
   const status = buildStatus(headline);
   const progress = computeProgress(headline, stages?.stages ?? null);

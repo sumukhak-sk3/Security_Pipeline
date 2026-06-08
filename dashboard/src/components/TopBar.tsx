@@ -63,7 +63,7 @@ export default function TopBar() {
           {theme === "dark" ? "Light" : "Dark"}
         </button>
         <div className="grid h-8 w-8 place-items-center rounded-full bg-surface-2 text-xs font-semibold">
-          SK
+          IB
         </div>
       </div>
     </header>

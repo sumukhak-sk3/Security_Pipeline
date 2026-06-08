@@ -91,8 +91,15 @@ function WorkflowNode({ w, index }: { w: Workflow; index: number }) {
 }
 
 function CICDNode() {
-  const { status, lastBuild } = useCICDStatus();
+  const { status, lastBuild, lastSuccessfulBuild } = useCICDStatus();
   const [triggering, setTriggering] = useState(false);
+
+  // Surface the last successful build on the overview — a single failed
+  // latest run shouldn't dominate the card. We still show the failed/running
+  // pill so the user knows the most recent attempt's state, but the build
+  // number always points at the last green build.
+  const displayBuild = lastSuccessfulBuild ?? lastBuild;
+  const displayStatus: typeof status = lastSuccessfulBuild ? "success" : status;
 
   const proxyBase = toProxyUrl("https://jenkins-qa2.inca.infoblox.com/job/IB_QA_CI_NIOS_CVE_Analyser");
   const today = new Date().toISOString().slice(0, 10);
@@ -129,7 +136,7 @@ function CICDNode() {
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-2">
             <div className="truncate text-sm font-medium">CICD Trigger</div>
-            <StatusPill status={status} className="shrink-0" />
+            <StatusPill status={displayStatus} className="shrink-0" />
           </div>
         </div>
       </div>
@@ -148,7 +155,7 @@ function CICDNode() {
         </button>
       </div>
       <div className="mt-2 text-[11px] text-ink-subtle">
-        {lastBuild ? `Build #${lastBuild}` : "No builds yet"}
+        {displayBuild ? `Last successful build #${displayBuild}` : "No successful builds yet"}
       </div>
     </Link>
   );

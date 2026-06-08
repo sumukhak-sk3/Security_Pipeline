@@ -7,11 +7,13 @@ const CICD_JOB_URL = "https://jenkins-qa2.inca.infoblox.com/job/IB_QA_CI_NIOS_CV
 interface CICDStatus {
   status: Status;
   lastBuild: number | null;
+  lastSuccessfulBuild: number | null;
 }
 
 export function useCICDStatus(): CICDStatus {
   const [status, setStatus] = useState<Status>("pending");
   const [lastBuild, setLastBuild] = useState<number | null>(null);
+  const [lastSuccessfulBuild, setLastSuccessfulBuild] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -19,11 +21,14 @@ export function useCICDStatus(): CICDStatus {
     async function poll() {
       try {
         const proxy = toProxyUrl(CICD_JOB_URL);
-        const res = await fetch(`${proxy}/api/json?tree=lastBuild[number,result,building]`);
+        const res = await fetch(
+          `${proxy}/api/json?tree=lastBuild[number,result,building],lastSuccessfulBuild[number]`,
+        );
         if (!res.ok) return;
         const data = await res.json();
         if (cancelled) return;
         const build = data.lastBuild;
+        setLastSuccessfulBuild(data.lastSuccessfulBuild?.number ?? null);
         if (!build) {
           setStatus("pending");
           setLastBuild(null);
@@ -52,5 +57,5 @@ export function useCICDStatus(): CICDStatus {
     };
   }, []);
 
-  return { status, lastBuild };
+  return { status, lastBuild, lastSuccessfulBuild };
 }

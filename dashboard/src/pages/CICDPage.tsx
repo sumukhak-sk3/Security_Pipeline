@@ -32,6 +32,7 @@ export default function CICDPage() {
         <JenkinsJobCard
           title="IB_QA_CI_NIOS_CVE_Analyser"
           jenkinsUrl={CICD_JOB_URL}
+          preferLastSuccessful
         />
       </section>
     </div>

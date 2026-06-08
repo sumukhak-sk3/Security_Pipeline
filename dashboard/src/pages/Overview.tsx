@@ -147,7 +147,15 @@ export default function Overview() {
       }
       const bJobs = w.jobs.map((j) => {
         const { status, progress } = bJobStatus(j.id, sbomPhase, niosBuildLive?.headline?.building === true);
-        return { ...j, status, progress };
+        // Mock placeholder steps don't have real backing data — fold them
+        // under the parent's status so the expanded view doesn't show
+        // "Pending" sub-steps when the parent is already Success/Running.
+        const steps = j.steps.map((s) => ({
+          ...s,
+          status,
+          progress: status === "success" ? 100 : status === "pending" ? 0 : progress,
+        }));
+        return { ...j, status, progress, steps };
       });
       const aggregateProgress = bJobs.length > 0
         ? Math.round(bJobs.reduce((a, j) => a + j.progress, 0) / bJobs.length)
@@ -317,7 +325,7 @@ export default function Overview() {
               .filter((w) => w.id === "B")
               .flatMap((w) =>
                 w.jobs
-                  .filter((j) => j.status === "running" || j.status === "success")
+                  .filter((j) => j.status === "running")
                   .slice(0, 3)
                   .map((j) => (
                     <JobCard key={`${w.id}-${j.id}`} job={j} onOpenConsole={setOpenJob} />
