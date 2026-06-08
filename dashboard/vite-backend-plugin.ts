@@ -348,26 +348,31 @@ async function pollJenkinsJob(cfg: PluginConfig, job: { id: string; url: string;
       } catch { /* ignore */ }
     }
 
-    // Fetch artifacts list for the headline build (one request, cheap)
-    // Hard-cap at 100 per job via Jenkins tree pagination. Some jobs
-    // (notably d-impact) produce 100k+ tiny internal script files which
-    // would otherwise saturate the response and the frontend table.
+    // Fetch artifacts list for the headline build (one request, cheap).
+    // d-impact dumps 100k+ internal Python script files alongside the actual
+    // CSV/XLSX impact report — for that job we widen the tree window and
+    // keep ONLY csv/xlsx files. Other jobs keep a generic noise filter.
     let artifacts: JenkinsArtifact[] = [];
     let artifactsBuildNumber: number | null = null;
     if (headline?.number) {
       try {
+        const isImpactJob = job.id === "d-impact";
+        const treeRange = isImpactJob ? "{0,5000}" : "{0,100}";
         const artData = await serverFetch(
-          `${job.url}/${headline.number}/api/json?tree=${encodeURIComponent("artifacts[fileName,relativePath]{0,100}")}`,
+          `${job.url}/${headline.number}/api/json?tree=${encodeURIComponent(`artifacts[fileName,relativePath]${treeRange}`)}`,
           headers,
         );
         const list: Array<{ fileName?: string; relativePath?: string }> = artData?.artifacts ?? [];
-        // Drop impact-analyser internal script noise (per-CVE Python files,
-        // index shards, intermediate JSON dumps) — they aren't user-visible
-        // artifacts and inflate the count to the tens of thousands.
-        const noiseRe = /(^|\/)(scripts|index|chunks|shards|cache|tmp|tools)(\/|$)|\.(py|pyc|pyo|bak)$/i;
+        // d-impact: strict whitelist (csv/xlsx only) so we surface the
+        // user-visible impact report and nothing else.
+        // Other jobs: drop common build noise (Python sources, caches, etc).
+        const reportRe = /\.(csv|xlsx)$/i;
+        const noiseRe = /(?:^|\/)(?:scripts|index|chunks|shards|cache|tmp|tools)(?:\/|$)|\.(?:py|pyc|pyo|bak)$/i;
         artifacts = list
           .filter((a) => a.fileName && a.relativePath)
-          .filter((a) => !noiseRe.test(a.relativePath!))
+          .filter((a) => isImpactJob
+            ? reportRe.test(a.fileName!)
+            : !noiseRe.test(a.relativePath!))
           .slice(0, 50)
           .map((a) => ({
             fileName: a.fileName!,

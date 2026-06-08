@@ -224,7 +224,11 @@ export default function JenkinsJobCard({ title, jenkinsUrl, rpBranchTag, rpUtTyp
             {!isRunning && rp.summary && <RPResultsSection summary={rp.summary} failedItems={rp.failedItems} />}
             <StagesSection stages={stages?.stages ?? null} />
             <ArtifactsCard
-              artifacts={artifacts}
+              artifacts={
+                jenkinsUrl.includes("NIOS-CVE-Analyser")
+                  ? artifacts.filter((a) => /\.(?:csv|xlsx)$/i.test(a.fileName))
+                  : artifacts
+              }
               buildNumber={artifactsBuildNumber}
               jenkinsUrl={jenkinsUrl}
             />

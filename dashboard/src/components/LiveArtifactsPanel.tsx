@@ -79,6 +79,10 @@ export default function LiveArtifactsPanel({
 
       const out: Row[] = [];
       const PER_JOB_CAP = 25;
+      // d-impact dumps thousands of internal Python files; only its CSV/XLSX
+      // report is user-visible. Backend already filters this, but we
+      // re-apply the whitelist here to defend against stale prefetch data.
+      const reportRe = /\.(?:csv|xlsx)$/i;
       for (const [jobId, cached] of Object.entries(jobs)) {
         if (excluded.has(jobId)) continue;
         if (!cached?.artifacts?.length) continue;
@@ -91,9 +95,13 @@ export default function LiveArtifactsPanel({
           continue;
         }
 
+        const items = jobId === "d-impact"
+          ? cached.artifacts.filter((a) => reportRe.test(a.fileName))
+          : cached.artifacts;
+
         // Per-job cap as a safety net — backend already trims to ~50, but
         // we re-cap here so a single rogue job can't dominate the table.
-        for (const a of cached.artifacts.slice(0, PER_JOB_CAP)) {
+        for (const a of items.slice(0, PER_JOB_CAP)) {
           out.push({
             jobId,
             jobTitle: titleById[jobId] ?? jobId,
