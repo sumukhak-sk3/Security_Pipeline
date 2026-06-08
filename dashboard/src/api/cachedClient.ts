@@ -12,6 +12,12 @@ import type { JenkinsJob, JenkinsRunDescribe } from "./jenkinsClient";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
+export interface CachedJenkinsArtifact {
+  fileName: string;
+  relativePath: string;
+  downloadUrl: string;
+}
+
 export interface CachedJenkinsJob {
   name: string;
   url: string;
@@ -21,6 +27,8 @@ export interface CachedJenkinsJob {
   builds: any[];
   stages: JenkinsRunDescribe | null;
   buildParams: Record<string, string>;
+  artifacts?: CachedJenkinsArtifact[];
+  artifactsBuildNumber?: number | null;
 }
 
 export interface CachedRPResult {

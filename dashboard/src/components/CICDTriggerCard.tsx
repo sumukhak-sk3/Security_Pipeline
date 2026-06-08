@@ -30,7 +30,7 @@ export default function CICDTriggerCard() {
 
   const proxyBase = toProxyUrl(CICD_JOB_URL);
   const today = new Date().toISOString().slice(0, 10);
-  const fallbackBranch = `bugfix/ubuntu-mirror-${today}`;
+  const fallbackBranch = `NIOSRFE-8575-${today}`;
 
   // Auto-detect the branch from the latest CVE-BUILD's BUILD_PATH param
   useEffect(() => {

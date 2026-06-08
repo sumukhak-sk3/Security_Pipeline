@@ -6,7 +6,9 @@ import StatusPill from "../components/StatusPill";
 import ProgressBar from "../components/ProgressBar";
 import ConsoleDrawer from "../components/ConsoleDrawer";
 import ImpactLivePanel from "../components/ImpactLivePanel";
+import ImpactSummaryCard from "../components/ImpactSummaryCard";
 import SBOMPanel from "../components/SBOMPanel";
+import SBOMUploadStatusCard from "../components/SBOMUploadStatusCard";
 import JenkinsJobCard from "../components/JenkinsJobCard";
 import WaitingJobCard from "../components/WaitingJobCard";
 import type { Job, WorkflowId } from "../types";
@@ -14,8 +16,14 @@ import { workflowShortName } from "../workflows";
 import { config } from "../config";
 import { workflowJobSpecs } from "../workflowJobs";
 import { useWorkflowLiveSummary } from "../hooks/useWorkflowLiveSummary";
+import { useSbomSummary } from "../hooks/useSbomSummary";
+import { useS3Cve } from "../hooks/useS3Cve";
 import { triggerWorkflowE } from "../api/triggerJenkins";
 import { cn } from "../lib/cn";
+import { relTime } from "../lib/format";
+import type { Status } from "../types";
+import { computeSbomPhase, sbomPhaseToStatus, type SbomPhase } from "../lib/sbomPhase";
+import type { S3CvePayload } from "../hooks/useBackendWs";
 
 export default function WorkflowPage() {
   const { id } = useParams();
@@ -31,7 +39,8 @@ export default function WorkflowPage() {
   const isImpact = wfId === "D";
   const isBuild = wfId === "E";
   const isSBOM = wfId === "B";
-  const isLive = isImpact || isBuild;
+  // B is live now too — it mirrors the CVE-BUILD job from E
+  const isLive = isImpact || isBuild || isSBOM;
 
   // Hooks MUST be unconditional — compute spec list before any early return.
   const liveSpecs = useMemo(
@@ -40,36 +49,92 @@ export default function WorkflowPage() {
   );
   const live = useWorkflowLiveSummary(liveSpecs);
 
-  // Cross-workflow awareness: always poll E so D and B know when upstream is running
+  // Cross-workflow awareness: always poll E so D and B know when upstream is
+  // running. For B (SBOM) we also need D so we can detect when Impact
+  // Analyser has been triggered for this run (= "stored to S3" signal).
   const eSpecs = useMemo(() => workflowJobSpecs("E"), []);
   const liveE = useWorkflowLiveSummary(eSpecs);
+  const dSpecs = useMemo(() => workflowJobSpecs("D"), []);
+  const liveD = useWorkflowLiveSummary(dSpecs);
+
+  // SBOM upload state (B's live data source = CVE-BUILD console parse)
+  const sbom = useSbomSummary();
+  const s3Cve = useS3Cve();
+  const eNiosBuild = liveE.jobs.find((j) => j.id === "e-nios-build");
+  const dImpactJob = liveD.jobs.find((j) => j.id === "d-impact");
 
   // Is Workflow E currently running? (orchestrator or any E job building)
   const eIsRunning = liveE.jobs.some((j) => j.headline?.building === true);
   const pipelineStartTs =
     liveE.jobs.find((j) => j.id === "e-orchestrator")?.headline?.timestamp ?? 0;
 
+  // ────────────────────────────────────────────────────────────────
+  // SBOM (Workflow B) phase machine — shared with the Overview card via
+  // lib/sbomPhase so both views always agree.
+  // ────────────────────────────────────────────────────────────────
+  const sbomPhase: SbomPhase = useMemo(
+    () => computeSbomPhase(
+      eNiosBuild?.headline ?? null,
+      sbom.summary ?? null,
+      dImpactJob?.headline ?? null,
+      s3Cve.data ?? null,
+      pipelineStartTs,
+    ),
+    [eNiosBuild, sbom.summary, dImpactJob, s3Cve.data, pipelineStartTs],
+  );
+
+  const liveBStatus = useMemo<{ status: Status; progress: number }>(
+    () => sbomPhaseToStatus(sbomPhase, eNiosBuild?.headline?.building === true),
+    [sbomPhase, eNiosBuild],
+  );
+
   // Is this downstream workflow stale (not yet triggered in current pipeline run)?
   const isStale = useMemo(() => {
-    if (!eIsRunning || pipelineStartTs === 0) return false;
-    if (wfId === "E") return false; // E is the upstream, it's never "stale"
+    if (pipelineStartTs === 0) return false;
+    if (wfId === "E") return false; // E is the upstream, never "stale"
     if (wfId === "D") {
-      // If D itself is building, it's current
+      // Impact Analyser depends on NIOS Build AND the S3 CVE upload (when
+      // S3 polling is configured). Quick/Slow UT do NOT block this step.
       if (live.jobs.some((j) => j.headline?.building)) return false;
       const dLatest = Math.max(...live.jobs.map((j) => j.headline?.timestamp ?? 0));
-      return dLatest < pipelineStartTs;
+      if (dLatest >= pipelineStartTs) return false; // D already ran in this run
+      const niosNotStarted = !eNiosBuild?.headline
+        || eNiosBuild.headline.timestamp < pipelineStartTs;
+      const niosStillBuilding = eNiosBuild?.headline?.building === true;
+      if (niosNotStarted || niosStillBuilding) return true;
+      // NIOS Build done for this run — gate on S3 if configured.
+      if (s3Cve.data?.configured) {
+        return (s3Cve.data.lastModifiedMs ?? 0) < pipelineStartTs;
+      }
+      return false;
     }
-    if (wfId === "B") return true; // B has no live data; if E is running → B is waiting
+    if (wfId === "B") {
+      // B is stale only if the orchestrator is running AND CVE-BUILD hasn't started yet
+      if (!eIsRunning) return false;
+      const niosTs = eNiosBuild?.headline?.timestamp ?? 0;
+      if (eNiosBuild?.headline?.building) return false;
+      return niosTs < pipelineStartTs;
+    }
     return false;
-  }, [eIsRunning, pipelineStartTs, wfId, live.jobs]);
+  }, [eIsRunning, pipelineStartTs, wfId, live.jobs, eNiosBuild, s3Cve.data]);
 
   if (!workflow) return <Navigate to="/" replace />;
 
   const redirectUrl = config.impactAnalyser.redirectUrl;
   const redirectLabel = config.impactAnalyser.redirectLabel;
 
-  const headerStatus = isStale ? "pending" : isLive ? live.status : workflow.status;
-  const headerProgress = isStale ? 0 : isLive ? live.progress : workflow.progress;
+  // Header status: B uses derived liveBStatus; E/D use live summary; otherwise mock
+  let headerStatus: Status;
+  let headerProgress: number;
+  if (isStale) {
+    headerStatus = "pending"; headerProgress = 0;
+  } else if (isSBOM) {
+    headerStatus = liveBStatus.status; headerProgress = liveBStatus.progress;
+  } else if (isLive) {
+    headerStatus = live.status; headerProgress = live.progress;
+  } else {
+    headerStatus = workflow.status; headerProgress = workflow.progress;
+  }
 
   return (
     <div className="space-y-6">
@@ -115,11 +180,22 @@ export default function WorkflowPage() {
             <div className="mt-2 w-60">
               <ProgressBar value={headerProgress} status={headerStatus} showLabel />
             </div>
-            {isLive && !isStale && (
+            {isLive && !isStale && !isSBOM && (
               <div className="mt-1 text-[10px] text-ink-subtle">
                 {live.jobsDone}/{live.jobsTotal} succeeded
                 {live.jobsRunning > 0 && ` · ${live.jobsRunning} running`}
                 {live.jobsFailed > 0 && ` · ${live.jobsFailed} failed`}
+              </div>
+            )}
+            {isSBOM && !isStale && eNiosBuild?.headline && (
+              <div className="mt-1 text-[10px] text-ink-subtle">
+                CVE-BUILD #{eNiosBuild.headline.number}
+                {sbomPhase === "uploaded" && (
+                  <> · <span className="text-status-success">BOM uploaded</span></>
+                )}
+                {sbomPhase === "s3" && (
+                  <> · <span className="text-status-success">Stored to S3</span></>
+                )}
               </div>
             )}
             {isStale && (
@@ -133,13 +209,22 @@ export default function WorkflowPage() {
 
       {isImpact && !isStale && <ImpactLivePanel />}
 
-      {/* SBOM (B) — show its panel only when not waiting */}
-      {isSBOM && !isStale && <SBOMPanel />}
-
       {isBuild && <TriggerPanel onBranchChange={setRpBranch} />}
 
       {isStale ? (
         <CrossWorkflowWaitingSection wfId={wfId} liveE={liveE} />
+      ) : isSBOM ? (
+        <SBOMWorkflowSection
+          cveBuildUrl={eSpecs.find((s) => s.id === "e-nios-build")?.jenkinsUrl ?? ""}
+          phase={sbomPhase}
+          currentBuildNumber={eNiosBuild?.headline?.number ?? null}
+          currentBuildIsBuilding={eNiosBuild?.headline?.building === true}
+          dImpactBuildNumber={
+            sbomPhase === "s3" ? dImpactJob?.headline?.number ?? null : null
+          }
+          s3={s3Cve.data ?? null}
+          pipelineStartTs={pipelineStartTs}
+        />
       ) : isLive ? (
         <LiveJobsSection
           liveSpecs={liveSpecs}
@@ -159,6 +244,277 @@ export default function WorkflowPage() {
 
       <ConsoleDrawer runId={currentRun.id} job={openJob} onClose={() => setOpenJob(null)} />
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* SBOM Workflow Section — Workflow B body                             */
+/* Phase-aware: waiting → uploaded → s3 (or failed).                   */
+/* Stale previous-build data is suppressed by passing currentBuildNumber */
+/* down to SBOMUploadStatusCard.                                       */
+/* ------------------------------------------------------------------ */
+
+function SBOMWorkflowSection({
+  cveBuildUrl,
+  phase,
+  currentBuildNumber,
+  currentBuildIsBuilding,
+  dImpactBuildNumber,
+  s3,
+  pipelineStartTs,
+}: {
+  readonly cveBuildUrl: string;
+  readonly phase: SbomPhase;
+  readonly currentBuildNumber: number | null;
+  readonly currentBuildIsBuilding: boolean;
+  readonly dImpactBuildNumber: number | null;
+  readonly s3: S3CvePayload | null;
+  readonly pipelineStartTs: number;
+}) {
+  return (
+    <div className="space-y-6">
+      <SBOMPhaseBanner
+        phase={phase}
+        currentBuildNumber={currentBuildNumber}
+        currentBuildIsBuilding={currentBuildIsBuilding}
+        dImpactBuildNumber={dImpactBuildNumber}
+      />
+      {(phase === "uploaded" || phase === "s3") && (
+        <SBOMUploadStatusCard expectedBuildNumber={currentBuildNumber} />
+      )}
+      <S3UploadStatusCard s3={s3} pipelineStartTs={pipelineStartTs} phase={phase} />
+      <section className="space-y-3">
+        <h2 className="text-sm font-semibold">CVE-BUILD job</h2>
+        {cveBuildUrl ? (
+          <JenkinsJobCard
+            title="CVE-BUILD (SBOM Upload)"
+            jenkinsUrl={cveBuildUrl}
+          />
+        ) : (
+          <div className="rounded border border-line bg-surface-1 p-4 text-xs text-ink-subtle">
+            CVE-BUILD URL not configured. Set <code>VITE_JENKINS_JOB_E_NIOS_BUILD</code> in your environment.
+          </div>
+        )}
+      </section>
+      {phase === "s3" && <SBOMPanel />}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* S3 Upload Status Card — surfaces backend S3 poller state            */
+/* Shows bucket + prefix, latest object key, last-modified timestamp,  */
+/* and whether the latest upload belongs to the current pipeline run.  */
+/* ------------------------------------------------------------------ */
+
+function S3UploadStatusCard({
+  s3,
+  pipelineStartTs,
+  phase,
+}: {
+  readonly s3: S3CvePayload | null;
+  readonly pipelineStartTs: number;
+  readonly phase: SbomPhase;
+}) {
+  if (!s3) {
+    return (
+      <section className="rounded-xl border border-line bg-surface-1 p-4">
+        <div className="text-sm font-semibold">CVE delta → S3</div>
+        <p className="mt-1 text-xs text-ink-subtle">
+          Waiting for the first S3 poll. The backend lists the configured bucket
+          every few seconds to detect new CVE delta uploads.
+        </p>
+      </section>
+    );
+  }
+
+  if (!s3.configured) {
+    return (
+      <section className="rounded-xl border border-dashed border-line bg-surface-1 p-4">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <div className="text-sm font-semibold">CVE delta → S3</div>
+            <p className="mt-1 text-xs text-ink-subtle">
+              S3 polling is not configured. Fill in <code>AWS_ACCESS_KEY_ID</code>,
+              {" "}<code>AWS_SECRET_ACCESS_KEY</code>, <code>S3_CVE_BUCKET</code>,
+              and <code>S3_CVE_PREFIX</code> in <code>.env.local</code> and restart
+              the dev server. Until then, Impact Analyser gating falls back to
+              detecting the downstream Jenkins job firing.
+            </p>
+          </div>
+          <span className="shrink-0 rounded-full bg-surface-2 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-ink-subtle">
+            Not configured
+          </span>
+        </div>
+      </section>
+    );
+  }
+
+  const latestMs = s3.lastModifiedMs || 0;
+  const matchesRun =
+    pipelineStartTs > 0 && latestMs > 0 && latestMs >= pipelineStartTs;
+  const hasNewerThanRun = matchesRun;
+
+  let badgeLabel: string;
+  let badgeClass: string;
+  let bodyDetail: string;
+
+  if (s3.error) {
+    badgeLabel = "Error";
+    badgeClass = "bg-status-failed/10 text-status-failed";
+    bodyDetail = s3.error;
+  } else if (latestMs === 0) {
+    badgeLabel = "Empty";
+    badgeClass = "bg-surface-2 text-ink-subtle";
+    bodyDetail = "No CSV or JSON objects found under the configured prefix yet.";
+  } else if (hasNewerThanRun) {
+    badgeLabel = "Stored for this run";
+    badgeClass = "bg-status-success/10 text-status-success";
+    bodyDetail =
+      "A new CVE delta has been uploaded since the current pipeline started. Impact Analyser is unblocked.";
+  } else if (pipelineStartTs > 0) {
+    badgeLabel = phase === "uploaded" ? "Waiting for new upload" : "Stale";
+    badgeClass = "bg-amber-500/10 text-amber-600 dark:text-amber-400";
+    bodyDetail =
+      "The newest S3 object is older than the current pipeline start. Impact Analyser will unblock once a new CVE delta appears.";
+  } else {
+    badgeLabel = "Latest";
+    badgeClass = "bg-surface-2 text-ink-muted";
+    bodyDetail = "Last known CVE delta upload.";
+  }
+
+  const lastModifiedIso = latestMs ? new Date(latestMs).toISOString() : "";
+
+  return (
+    <section className="rounded-xl border border-line bg-surface-1 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <div className="text-sm font-semibold">CVE delta → S3</div>
+            <span className={cn("rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide", badgeClass)}>
+              {badgeLabel}
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-ink-muted">{bodyDetail}</p>
+        </div>
+        <div className="shrink-0 text-right text-[11px] text-ink-subtle">
+          {s3.totalCount} object{s3.totalCount === 1 ? "" : "s"} in prefix
+        </div>
+      </div>
+
+      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-subtle">Bucket</div>
+          <div className="mt-1 truncate font-mono text-xs text-ink" title={s3.bucket}>
+            {s3.bucket || "—"}
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-subtle">Prefix</div>
+          <div className="mt-1 truncate font-mono text-xs text-ink" title={s3.prefix}>
+            {s3.prefix || "(root)"}
+          </div>
+        </div>
+        <div className="sm:col-span-2">
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-subtle">Latest object</div>
+          <div className="mt-1 truncate font-mono text-xs text-ink" title={s3.key ?? ""}>
+            {s3.key ?? "—"}
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-subtle">Last modified</div>
+          <div className="mt-1 text-xs text-ink">
+            {lastModifiedIso ? <>{relTime(lastModifiedIso)}</> : "—"}
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-subtle">Poller last ran</div>
+          <div className="mt-1 text-xs text-ink">
+            {s3.fetchedAt ? relTime(new Date(s3.fetchedAt).toISOString()) : "—"}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function SBOMPhaseBanner({
+  phase,
+  currentBuildNumber,
+  currentBuildIsBuilding,
+  dImpactBuildNumber,
+}: {
+  readonly phase: SbomPhase;
+  readonly currentBuildNumber: number | null;
+  readonly currentBuildIsBuilding: boolean;
+  readonly dImpactBuildNumber: number | null;
+}) {
+  const buildRef = currentBuildNumber ? `#${currentBuildNumber}` : "";
+  if (phase === "noBuild") {
+    return (
+      <section className="rounded-xl border border-dashed border-line bg-surface-1 p-4 text-xs text-ink-subtle">
+        No CVE-BUILD has run yet. Trigger the pipeline from the Build &amp; Unit Tests page.
+      </section>
+    );
+  }
+  if (phase === "failed") {
+    return (
+      <section className="rounded-xl border border-status-failed/30 bg-status-failed/5 p-4">
+        <div className="text-sm font-semibold text-status-failed">CVE-BUILD {buildRef} failed</div>
+        <p className="mt-1 text-xs text-ink-muted">
+          The build did not reach the SBOM upload step. Check the CVE-BUILD console below.
+        </p>
+      </section>
+    );
+  }
+  if (phase === "waiting") {
+    return (
+      <section className="rounded-xl border border-amber-300/40 bg-amber-50/40 p-4 dark:border-amber-400/30 dark:bg-amber-500/10">
+        <div className="flex items-center gap-2">
+          <span className="relative flex h-2 w-2">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-500" />
+          </span>
+          <div className="text-sm font-semibold text-amber-700 dark:text-amber-300">
+            Waiting for NIOS Build {buildRef} to complete
+          </div>
+        </div>
+        <p className="mt-1 text-xs text-ink-muted">
+          SBOM extraction starts once the CVE-BUILD console prints <code>BOM uploaded successfully</code>.
+          {currentBuildIsBuilding ? " Build is still running." : " Build completed; waiting for the upload step to be detected."}
+        </p>
+      </section>
+    );
+  }
+  if (phase === "uploaded") {
+    return (
+      <section className="rounded-xl border border-status-running/40 bg-status-running/5 p-4">
+        <div className="flex items-center gap-2">
+          <span className="h-2 w-2 rounded-full bg-status-running animate-pulse" />
+          <div className="text-sm font-semibold text-status-running">
+            BOM uploaded for {buildRef} — preparing CVE list
+          </div>
+        </div>
+        <p className="mt-1 text-xs text-ink-muted">
+          Waiting for the CVE list to be handed off to S3 and the Impact Analyser pipeline to be triggered.
+        </p>
+      </section>
+    );
+  }
+  // phase === "s3"
+  return (
+    <section className="rounded-xl border border-status-success/40 bg-status-success/5 p-4">
+      <div className="flex items-center gap-2">
+        <span className="h-2 w-2 rounded-full bg-status-success" />
+        <div className="text-sm font-semibold text-status-success">
+          Stored to S3 — Impact Analyser triggered
+        </div>
+      </div>
+      <p className="mt-1 text-xs text-ink-muted">
+        CVE list from CVE-BUILD {buildRef} has been uploaded and the Impact Analyser pipeline
+        {dImpactBuildNumber ? <> picked it up as run #{dImpactBuildNumber}.</> : " has started."}
+      </p>
+    </section>
   );
 }
 
@@ -276,6 +632,7 @@ function LiveJobsSection({
                   : j.id === "e-slow-ut" ? "slow"
                   : undefined
               }
+              historyOverride={j.id === "d-impact" ? <ImpactSummaryCard /> : undefined}
             />
           ),
         )}
@@ -295,24 +652,31 @@ function CrossWorkflowWaitingSection({
   wfId: WorkflowId;
   liveE: LiveWorkflowSummary;
 }) {
-  // Find the currently building E job for display
-  const buildingJob = liveE.jobs.find((j) => j.headline?.building);
+  // For B and D, the only blocking upstream is the orchestrator + NIOS Build.
+  // Quick UT / Slow UT run in parallel and do NOT block these downstream
+  // workflows, so we exclude them from the "currently running upstream" hint.
+  const blockingUpstreamIds = wfId === "B" || wfId === "D"
+    ? new Set(["e-orchestrator", "e-nios-build"])
+    : null;
+  const buildingJob = liveE.jobs.find((j) =>
+    j.headline?.building && (!blockingUpstreamIds || blockingUpstreamIds.has(j.id)),
+  );
   const buildingTitle = buildingJob
     ? liveE.jobs.find((j) => j.id === buildingJob.id)?.title ?? buildingJob.id
-    : "Build & Unit Tests";
+    : "NIOS Build";
 
   const descriptions: Record<string, { wait: string; detail: string }> = {
     B: {
-      wait: "Build & Unit Tests",
+      wait: "NIOS Build",
       detail:
-        "The SBOM & CVE Scan step will start after the NIOS Build completes and produces the SBOM artifact. " +
-        "It will upload the SBOM to Dependency-Track for CVE analysis.",
+        "The SBOM & CVE Scan step will start after NIOS Build completes and uploads the BOM to Dependency-Track. " +
+        "Quick UT / Slow UT are independent and do not block this step.",
     },
     D: {
-      wait: "Build & Unit Tests",
+      wait: "SBOM/CVE upload to S3",
       detail:
-        "Impact Analysis will be triggered after Build & Unit Tests and SBOM & CVE Scan complete. " +
-        "It runs code-level impact analysis using the CVE list produced upstream.",
+        "Impact Analyser will be triggered as soon as the CVE delta CSV from this pipeline run lands in the configured S3 bucket. " +
+        "Quick UT and Slow UT run in parallel and do NOT block Impact Analysis.",
     },
   };
 
@@ -384,7 +748,7 @@ function TriggerPanel({ onBranchChange }: { onBranchChange?: (branch: string) =>
   const [activeAction, setActiveAction] = useState<"none" | "test" | "trigger">("none");
   const [result, setResult] = useState<{ type: "success" | "error"; msg: string } | null>(null);
 
-  const placeholder = `bugfix/ubuntu-mirror-${new Date().toISOString().slice(0, 10)}`;
+  const placeholder = `NIOSRFE-8575-${new Date().toISOString().slice(0, 10)}`;
   const busy = activeAction !== "none";
 
   const handleBranchChange = (value: string) => {

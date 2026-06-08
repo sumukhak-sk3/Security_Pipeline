@@ -10,6 +10,12 @@ import { useEffect, useRef, useState, useCallback } from "react";
 
 // ─── Type-safe WebSocket message definitions ────────────────────────────────
 
+export interface JenkinsArtifactPayload {
+  fileName: string;
+  relativePath: string;
+  downloadUrl: string;
+}
+
 export interface JenkinsJobPayload {
   name: string;
   url: string;
@@ -19,6 +25,8 @@ export interface JenkinsJobPayload {
   builds: Array<{ number: number; url: string; result: string | null; building: boolean; timestamp: number; duration: number; displayName?: string }>;
   stages: unknown;
   buildParams: Record<string, string>;
+  artifacts?: JenkinsArtifactPayload[];
+  artifactsBuildNumber?: number | null;
 }
 
 export interface RPLaunchPayload {
@@ -58,13 +66,59 @@ export interface WsImpactUpdatePayload {
   health: unknown;
   indexes: unknown[] | null;
   latestRun: unknown;
+  cveSummary?: ImpactCveSummaryPayload | null;
+}
+
+export interface ImpactCveSummaryPayload {
+  runId: string;
+  total: number;
+  withDecision: number;
+  withoutDecision: number;
+  bySeverity: Record<string, number>;
+  byVerdict: Record<string, number>;
+  byStatus: Record<string, number>;
+  fetchedAt: number;
+}
+
+export interface SbomSummaryPayload {
+  buildNumber: number;
+  buildUrl: string;
+  builtAt?: number;
+  project: string | null;
+  components: number | null;
+  groups: string[];
+  buildLabel: string | null;
+  dtrackUrl: string | null;
+  bomUploaded: boolean;
+  bomToken: string | null;
+  parsedAt: number;
+}
+
+export interface S3CvePayload {
+  key: string | null;
+  lastModifiedMs: number;
+  etag: string | null;
+  fetchedAt: number;
+  bucket: string;
+  prefix: string;
+  configured: boolean;
+  totalCount: number;
+  error: string | null;
+}
+
+export interface WsInitPayloadExtra {
+  impact?: WsImpactUpdatePayload | null;
+  sbom?: SbomSummaryPayload | null;
+  s3Cve?: S3CvePayload | null;
 }
 
 export type WsMessage =
-  | { type: "init"; payload: WsInitPayload; ts: number }
+  | { type: "init"; payload: WsInitPayload & WsInitPayloadExtra; ts: number }
   | { type: "jenkins:update"; payload: WsJenkinsUpdatePayload; ts: number }
   | { type: "rp:update"; payload: WsRPUpdatePayload; ts: number }
-  | { type: "impact:update"; payload: WsImpactUpdatePayload; ts: number };
+  | { type: "impact:update"; payload: WsImpactUpdatePayload; ts: number }
+  | { type: "sbom:update"; payload: SbomSummaryPayload; ts: number }
+  | { type: "s3:update"; payload: S3CvePayload; ts: number };
 
 export type WsMessageType = WsMessage["type"];
 

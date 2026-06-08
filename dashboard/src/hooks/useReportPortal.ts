@@ -133,7 +133,7 @@ export function useReportPortalLaunch(
   // Reduced polling since WS pushes updates
   useEffect(() => {
     if (!branchTag || !utType) return;
-    const id = setInterval(doFetch, config.api.pollIntervalMs * 6);
+    const id = setInterval(doFetch, config.api.pollIntervalMs);
     return () => clearInterval(id);
   }, [branchTag, utType, doFetch]);
 

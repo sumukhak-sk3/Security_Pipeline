@@ -59,6 +59,24 @@ export function fetchLatestRun(): Promise<RunInfo> {
   return getJson<RunInfo>("/runs/latest");
 }
 
+export interface CveItem {
+  cve_id?: string;
+  id?: string;
+  severity?: string;
+  status?: string;
+  decision?: { verdict?: string } | string | null;
+  verdict?: string;
+  [k: string]: unknown;
+}
+
+export async function fetchRunCves(runId: string): Promise<CveItem[]> {
+  const data = await getJson<CveItem[] | { cves?: CveItem[]; items?: CveItem[] }>(`/runs/${encodeURIComponent(runId)}/cves`);
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.cves)) return data.cves;
+  if (Array.isArray(data?.items)) return data.items;
+  return [];
+}
+
 /** Probe a path and return its raw JSON body (or null on failure). */
 export async function probe(path: string): Promise<unknown> {
   try {

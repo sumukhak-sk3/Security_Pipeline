@@ -9,6 +9,7 @@ import type { LaunchSummary, FailedItem } from "../api/reportPortalClient";
 import StatusPill from "./StatusPill";
 import ProgressBar from "./ProgressBar";
 import JenkinsConsoleDrawer from "./JenkinsConsoleDrawer";
+import ArtifactsCard from "./ArtifactsCard";
 import { formatDuration } from "../lib/format";
 import { cn } from "../lib/cn";
 import { buildStatus, computeProgress, stageStatus } from "../lib/jenkinsMap";
@@ -36,10 +37,12 @@ interface JobProps {
   readonly rpBranchTag?: string;
   /** "quick" or "slow" — determines which RP launch to look up */
   readonly rpUtType?: "quick" | "slow";
+  /** When provided, replaces the recent-builds history section in the expanded view. */
+  readonly historyOverride?: React.ReactNode;
 }
 
-export default function JenkinsJobCard({ title, jenkinsUrl, rpBranchTag, rpUtType }: JobProps) {
-  const { loading, job, stages, error, refresh } = useJenkinsJob(jenkinsUrl);
+export default function JenkinsJobCard({ title, jenkinsUrl, rpBranchTag, rpUtType, historyOverride }: JobProps) {
+  const { loading, job, stages, artifacts, artifactsBuildNumber, error, refresh } = useJenkinsJob(jenkinsUrl);
   const [autoBranch, setAutoBranch] = useState<string | undefined>();
   const [buildParams, setBuildParams] = useState<Record<string, string>>({});
 
@@ -189,7 +192,7 @@ export default function JenkinsJobCard({ title, jenkinsUrl, rpBranchTag, rpUtTyp
                   : "—"}
               </Field>
             </div>
-            {rp.summary && <RPBadge summary={rp.summary} />}
+            {!isRunning && rp.summary && <RPBadge summary={rp.summary} />}
           </div>
           <div className="flex shrink-0 flex-col items-end gap-2">
             <button
@@ -218,13 +221,20 @@ export default function JenkinsJobCard({ title, jenkinsUrl, rpBranchTag, rpUtTyp
 
         {open && (
           <div className="border-t border-line">
-            {rp.summary && <RPResultsSection summary={rp.summary} failedItems={rp.failedItems} />}
+            {!isRunning && rp.summary && <RPResultsSection summary={rp.summary} failedItems={rp.failedItems} />}
             <StagesSection stages={stages?.stages ?? null} />
-            <HistorySection
-              builds={job.builds}
-              onOpenConsole={(n) => setConsoleFor(n)}
+            <ArtifactsCard
+              artifacts={artifacts}
+              buildNumber={artifactsBuildNumber}
               jenkinsUrl={jenkinsUrl}
             />
+            {historyOverride ?? (
+              <HistorySection
+                builds={job.builds}
+                onOpenConsole={(n) => setConsoleFor(n)}
+                jenkinsUrl={jenkinsUrl}
+              />
+            )}
           </div>
         )}
       </div>

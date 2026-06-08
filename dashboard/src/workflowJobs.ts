@@ -35,14 +35,12 @@ const SPECS: Record<WorkflowKey, JobSpec[]> = {
     {
       id: "e-quick-ut",
       title: "Quick UT",
-      dependsOn: "e-nios-build",
-      waitDescription: "Will be triggered after NIOS Build completes. Runs the quick unit test suite.",
+      waitDescription: "Triggered by NIOS Build while it runs. Executes the quick unit test suite in parallel with NIOS Build and Slow UT.",
     },
     {
       id: "e-slow-ut",
       title: "Slow UT",
-      dependsOn: "e-nios-build",
-      waitDescription: "Will be triggered after NIOS Build completes. Runs the full slow unit test suite in parallel with Quick UT.",
+      waitDescription: "Triggered by NIOS Build while it runs. Executes the full slow unit test suite in parallel with NIOS Build and Quick UT.",
     },
   ],
   B: [],

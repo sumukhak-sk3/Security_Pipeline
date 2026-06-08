@@ -61,16 +61,12 @@ export default function SBOMPanel() {
     );
   }
 
+  // Errors (auth, network, 401) are silenced from the UI — Dependency-Track
+  // is a best-effort integration; the SBOM upload card on Workflow B already
+  // shows whether the BOM was uploaded. Console-log for debugging only.
   if (error) {
-    return (
-      <div className="rounded border border-status-failed/40 bg-status-failed/5 px-4 py-4">
-        <div className="text-sm font-medium">SBOM & Vulnerability Data</div>
-        <div className="mt-2 text-[11px] text-status-failed">{error}</div>
-        <div className="mt-1 text-[10px] text-ink-subtle">
-          Ensure Dependency-Track is reachable and <code>DTRACK_API_KEY</code> is set in .env.local
-        </div>
-      </div>
-    );
+    if (typeof console !== "undefined") console.debug("[SBOMPanel] dtrack:", error);
+    return null;
   }
 
   if (projects.length === 0) {

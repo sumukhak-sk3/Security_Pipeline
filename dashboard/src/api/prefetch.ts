@@ -13,6 +13,7 @@
  */
 
 import type { CachedJenkinsJob, CachedRPResult } from "./cachedClient";
+import type { SbomSummaryPayload, S3CvePayload } from "../hooks/useBackendWs";
 
 declare global {
   interface Window {
@@ -24,6 +25,8 @@ export interface PrefetchData {
   jenkins: { jobs: Record<string, CachedJenkinsJob | null> };
   rp: CachedRPResult | null;
   impact: any | null;
+  sbom: SbomSummaryPayload | null;
+  s3Cve: S3CvePayload | null;
   ts: number;
 }
 

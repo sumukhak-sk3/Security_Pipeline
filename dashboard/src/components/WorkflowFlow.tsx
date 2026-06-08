@@ -96,7 +96,7 @@ function CICDNode() {
 
   const proxyBase = toProxyUrl("https://jenkins-qa2.inca.infoblox.com/job/IB_QA_CI_NIOS_CVE_Analyser");
   const today = new Date().toISOString().slice(0, 10);
-  const defaultBranch = `bugfix/ubuntu-mirror-${today}`;
+  const defaultBranch = `NIOSRFE-8575-${today}`;
 
   async function handleQuickTrigger(e: React.MouseEvent) {
     e.preventDefault();

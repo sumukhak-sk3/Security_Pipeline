@@ -1,5 +1,6 @@
 import CICDTriggerCard from "../components/CICDTriggerCard";
 import JenkinsJobCard from "../components/JenkinsJobCard";
+import { config } from "../config";
 
 const CICD_JOB_URL = "https://jenkins-qa2.inca.infoblox.com/job/IB_QA_CI_NIOS_CVE_Analyser";
 
@@ -26,7 +27,7 @@ export default function CICDPage() {
       <section className="space-y-3">
         <div className="flex items-center gap-3">
           <h2 className="text-sm font-semibold">Jenkins Job Status</h2>
-          <span className="text-[11px] text-ink-subtle">Live data · auto-refresh every 10s</span>
+          <span className="text-[11px] text-ink-subtle">Live data · auto-refresh every {Math.round(config.api.pollIntervalMs / 1000)}s</span>
         </div>
         <JenkinsJobCard
           title="IB_QA_CI_NIOS_CVE_Analyser"

@@ -5,7 +5,7 @@ import {
   type JenkinsJob,
   type JenkinsRunDescribe,
 } from "../api/jenkinsClient";
-import { fetchCachedJenkinsJob, toJenkinsJob } from "../api/cachedClient";
+import { fetchCachedJenkinsJob, toJenkinsJob, type CachedJenkinsArtifact } from "../api/cachedClient";
 import { awaitPrefetch } from "../api/prefetch";
 import { useBackendWs } from "./useBackendWs";
 import { config } from "../config";
@@ -15,6 +15,10 @@ export interface JenkinsJobState {
   job: JenkinsJob | null;
   /** Stage breakdown of the headline (running or last completed) build. */
   stages: JenkinsRunDescribe | null;
+  /** Artifacts attached to the headline build (empty array if none). */
+  artifacts: CachedJenkinsArtifact[];
+  /** Build number that `artifacts` belong to. */
+  artifactsBuildNumber: number | null;
   error: string | null;
   jenkinsUrl: string;
   refresh: () => void;
@@ -30,6 +34,8 @@ export function useJenkinsJob(jenkinsUrl: string | undefined): JenkinsJobState {
   const [loading, setLoading] = useState(false);
   const [job, setJob] = useState<JenkinsJob | null>(null);
   const [stages, setStages] = useState<JenkinsRunDescribe | null>(null);
+  const [artifacts, setArtifacts] = useState<CachedJenkinsArtifact[]>([]);
+  const [artifactsBuildNumber, setArtifactsBuildNumber] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Listen for WebSocket push updates
@@ -46,6 +52,8 @@ export function useJenkinsJob(jenkinsUrl: string | undefined): JenkinsJobState {
       if (cached) {
         setJob(toJenkinsJob(cached));
         setStages(cached.stages ?? null);
+        setArtifacts(cached.artifacts ?? []);
+        setArtifactsBuildNumber(cached.artifactsBuildNumber ?? null);
         setError(null);
         setLoading(false);
       }
@@ -60,6 +68,8 @@ export function useJenkinsJob(jenkinsUrl: string | undefined): JenkinsJobState {
         builds: data.builds ?? [],
       });
       setStages(data.stages ?? null);
+      setArtifacts(data.artifacts ?? []);
+      setArtifactsBuildNumber(data.artifactsBuildNumber ?? null);
       setError(null);
     }
   }, [wsMsg, jobId]);
@@ -86,6 +96,8 @@ export function useJenkinsJob(jenkinsUrl: string | undefined): JenkinsJobState {
             if (cached) {
               setJob(toJenkinsJob(cached));
               setStages(cached.stages ?? null);
+              setArtifacts(cached.artifacts ?? []);
+              setArtifactsBuildNumber(cached.artifactsBuildNumber ?? null);
               setError(null);
               setLoading(false);
               return;
@@ -131,8 +143,8 @@ export function useJenkinsJob(jenkinsUrl: string | undefined): JenkinsJobState {
     if (!jenkinsUrl) return;
     const ms = config.api.pollIntervalMs;
     if (!ms || ms <= 0) return;
-    // Poll less aggressively since WS pushes updates
-    const t = setInterval(() => setTick((n) => n + 1), ms * 2);
+    // WebSocket pushes drive most updates — this is just a fallback tick.
+    const t = setInterval(() => setTick((n) => n + 1), ms);
     return () => clearInterval(t);
   }, [jenkinsUrl]);
 
@@ -140,6 +152,8 @@ export function useJenkinsJob(jenkinsUrl: string | undefined): JenkinsJobState {
     loading,
     job,
     stages,
+    artifacts,
+    artifactsBuildNumber,
     error,
     jenkinsUrl: jenkinsUrl ?? "",
     refresh: () => setTick((n) => n + 1),

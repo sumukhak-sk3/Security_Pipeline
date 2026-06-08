@@ -86,8 +86,11 @@ function aggregate(items: LiveJobSummary[]): Omit<LiveWorkflowSummary, "loading"
   }
 
   let status: Status = "pending";
-  if (failed > 0) status = "failed";
-  else if (running > 0) status = "running";
+  // Running takes priority over failed: while at least one job is still
+  // building, the workflow as a whole is "running" — failures only count
+  // as the final verdict once everything has stopped.
+  if (running > 0) status = "running";
+  else if (failed > 0) status = "failed";
   else if (reachableTotal > 0 && done === reachableTotal) status = "success";
   else if (done > 0 && genuinelyPending > 0) status = "running";
   else if (done > 0 && genuinelyPending === 0) status = "success"; // all reachable jobs done, rest are unreachable

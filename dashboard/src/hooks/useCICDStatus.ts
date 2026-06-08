@@ -45,7 +45,7 @@ export function useCICDStatus(): CICDStatus {
     }
 
     poll();
-    const id = setInterval(poll, 15_000);
+    const id = setInterval(poll, 120_000);
     return () => {
       cancelled = true;
       clearInterval(id);

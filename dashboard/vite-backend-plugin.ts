@@ -19,6 +19,7 @@ import type { Plugin, ViteDevServer } from "vite";
 import { loadEnv } from "vite";
 import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage, ServerResponse } from "http";
+import { S3Client, ListObjectsV2Command } from "@aws-sdk/client-s3";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -26,6 +27,13 @@ interface CacheEntry<T = unknown> {
   data: T;
   fetchedAt: number;
   ttl: number;
+}
+
+interface JenkinsArtifact {
+  fileName: string;
+  relativePath: string;
+  /** Full URL to download the artifact (server-side proxied path). */
+  downloadUrl: string;
 }
 
 interface JenkinsJobCache {
@@ -37,6 +45,35 @@ interface JenkinsJobCache {
   builds: any[];
   stages: any;
   buildParams: Record<string, string>;
+  /** Artifacts attached to the headline build (running build if any, else last completed). */
+  artifacts: JenkinsArtifact[];
+  /** Build number that `artifacts` belong to (for cache invalidation). */
+  artifactsBuildNumber: number | null;
+}
+
+interface SbomSummaryCache {
+  buildNumber: number;
+  buildUrl: string;
+  builtAt?: number;
+  project: string | null;
+  components: number | null;
+  groups: string[];
+  buildLabel: string | null;
+  dtrackUrl: string | null;
+  bomUploaded: boolean;
+  bomToken: string | null;
+  parsedAt: number;
+}
+
+interface ImpactCveSummary {
+  runId: string;
+  total: number;
+  withDecision: number;
+  withoutDecision: number;
+  bySeverity: Record<string, number>;
+  byVerdict: Record<string, number>;
+  byStatus: Record<string, number>;
+  fetchedAt: number;
 }
 
 interface RPLaunchCache {
@@ -51,6 +88,26 @@ interface RPLaunchCache {
   endTime?: string;
   url: string;
   failedItems?: any[];
+}
+
+interface S3CveCache {
+  /** Latest matching object key seen in the bucket/prefix. */
+  key: string | null;
+  /** Last-modified epoch ms (when the object hit S3). */
+  lastModifiedMs: number;
+  /** ETag of the latest object (for change detection). */
+  etag: string | null;
+  /** When the poller last successfully listed objects. */
+  fetchedAt: number;
+  /** Bucket + prefix in use (echo back for debugging). */
+  bucket: string;
+  prefix: string;
+  /** Total number of matching objects in the prefix. */
+  totalCount: number;
+  /** True when AWS credentials + bucket are configured. */
+  configured: boolean;
+  /** Last poll error message (null on success). */
+  error: string | null;
 }
 
 // ─── In-memory LRU cache (bounded, max 200 entries) ─────────────────────────
@@ -179,6 +236,18 @@ interface PluginConfig {
   pollIntervalMs: number;
   cacheTtlMs: number;
   rpCacheTtlMs: number;
+  jiraBaseUrl: string;
+  jiraEmail: string;
+  jiraToken: string;
+  jiraIssueKey: string;
+  s3: {
+    bucket: string;
+    prefix: string;
+    region: string;
+    accessKeyId: string;
+    secretAccessKey: string;
+    pollIntervalMs: number;
+  };
 }
 
 function buildConfig(env: Record<string, string>): PluginConfig {
@@ -206,9 +275,21 @@ function buildConfig(env: Record<string, string>): PluginConfig {
       impact: impactUser && impactToken ? `${impactUser}:${impactToken}` : "",
     },
     impactApiUrl: env.VITE_IMPACT_API_URL ?? "http://10.120.23.89:8088",
-    pollIntervalMs: Number(env.VITE_POLL_INTERVAL_MS) || 5000,
-    cacheTtlMs: 8000,   // Jenkins cache: 8s (slightly longer than poll interval)
-    rpCacheTtlMs: 30000, // RP cache: 30s
+    pollIntervalMs: Number(env.VITE_POLL_INTERVAL_MS) || 120_000, // 2 min — eases frontend/backend load
+    cacheTtlMs: 130_000, // Jenkins cache: ~2 min (slightly longer than poll interval)
+    rpCacheTtlMs: 120_000, // RP cache: 2 min
+    jiraBaseUrl: env.JIRA_BASE_URL ?? "https://infoblox.atlassian.net",
+    jiraEmail: env.JIRA_EMAIL ?? "",
+    jiraToken: env.JIRA_API_TOKEN ?? "",
+    jiraIssueKey: env.JIRA_ISSUE_KEY ?? "NIOSRFE-8575",
+    s3: {
+      bucket: env.S3_CVE_BUCKET ?? env.VITE_S3_BUCKET ?? "",
+      prefix: env.S3_CVE_PREFIX ?? env.VITE_S3_CVE_PREFIX ?? "",
+      region: env.S3_CVE_REGION ?? env.AWS_REGION ?? env.VITE_S3_REGION ?? "us-west-1",
+      accessKeyId: env.AWS_ACCESS_KEY_ID ?? "",
+      secretAccessKey: env.AWS_SECRET_ACCESS_KEY ?? "",
+      pollIntervalMs: Number(env.S3_CVE_POLL_INTERVAL_MS) || 20_000,
+    },
   };
 }
 
@@ -267,6 +348,36 @@ async function pollJenkinsJob(cfg: PluginConfig, job: { id: string; url: string;
       } catch { /* ignore */ }
     }
 
+    // Fetch artifacts list for the headline build (one request, cheap)
+    // Hard-cap at 100 per job via Jenkins tree pagination. Some jobs
+    // (notably d-impact) produce 100k+ tiny internal script files which
+    // would otherwise saturate the response and the frontend table.
+    let artifacts: JenkinsArtifact[] = [];
+    let artifactsBuildNumber: number | null = null;
+    if (headline?.number) {
+      try {
+        const artData = await serverFetch(
+          `${job.url}/${headline.number}/api/json?tree=${encodeURIComponent("artifacts[fileName,relativePath]{0,100}")}`,
+          headers,
+        );
+        const list: Array<{ fileName?: string; relativePath?: string }> = artData?.artifacts ?? [];
+        // Drop impact-analyser internal script noise (per-CVE Python files,
+        // index shards, intermediate JSON dumps) — they aren't user-visible
+        // artifacts and inflate the count to the tens of thousands.
+        const noiseRe = /(^|\/)(scripts|index|chunks|shards|cache|tmp|tools)(\/|$)|\.(py|pyc|pyo|bak)$/i;
+        artifacts = list
+          .filter((a) => a.fileName && a.relativePath)
+          .filter((a) => !noiseRe.test(a.relativePath!))
+          .slice(0, 50)
+          .map((a) => ({
+            fileName: a.fileName!,
+            relativePath: a.relativePath!,
+            downloadUrl: `${job.url}/${headline.number}/artifact/${a.relativePath}`,
+          }));
+        artifactsBuildNumber = headline.number;
+      } catch { /* ignore */ }
+    }
+
     return {
       name: jobData.name,
       url: jobData.url,
@@ -276,11 +387,241 @@ async function pollJenkinsJob(cfg: PluginConfig, job: { id: string; url: string;
       builds: jobData.builds ?? [],
       stages,
       buildParams,
+      artifacts,
+      artifactsBuildNumber,
     };
   } catch (err: any) {
     recordFailure(circuitKey);
     console.error(`[backend] Jenkins poll failed for ${job.id}:`, err.message);
     return null;
+  }
+}
+
+// ─── SBOM console parser (CVE-BUILD job) ────────────────────────────────────
+//
+// CVE-BUILD console contains a SUMMARY block describing the BOM uploaded to
+// Dependency-Track. We tail the last ~30KB of console once per completed build
+// and extract the key fields. Cached at `sbom:latest`, keyed by buildNumber so
+// we never re-parse the same build.
+
+function parseSbomSummary(text: string): Omit<SbomSummaryCache, "buildNumber" | "buildUrl" | "builtAt" | "parsedAt"> | null {
+  // Strip timestamps like "02:53:20 " at line starts to simplify matching
+  const cleaned = text.replace(/^\s*\d{2}:\d{2}:\d{2}\s+/gm, "");
+
+  // Upload confirmation lives in the STEP 4 block — search the whole text
+  const bomToken = grabIn(cleaned, /BOM uploaded successfully\s*\(token:\s*([^\s)]+)\)/);
+  const bomUploaded = /BOM uploaded successfully/.test(cleaned)
+    || /BOM submitted to DTrack/.test(cleaned);
+
+  // SUMMARY block fields (only present after upload completes). Return partial
+  // entry (bomUploaded only) when SUMMARY hasn't been printed yet so the UI
+  // can flip from "waiting" to "running" as soon as the upload step fires.
+  const summaryIdx = cleaned.search(/^\s*SUMMARY\s*$/m);
+  if (summaryIdx < 0) {
+    if (!bomUploaded) return null;
+    return {
+      project: null, components: null, groups: [],
+      buildLabel: null, dtrackUrl: null,
+      bomUploaded: true, bomToken,
+    };
+  }
+
+  const summaryBlock = cleaned.slice(summaryIdx);
+  const project = grabIn(summaryBlock, /Project:\s+(.+)$/m);
+  const componentsStr = grabIn(summaryBlock, /Components:\s+(\d+)/m);
+  const groupsStr = grabIn(summaryBlock, /Groups:\s+(.+)$/m);
+  const buildLabel = grabIn(summaryBlock, /Build:\s+(.+)$/m);
+  const dtrackUrl = grabIn(summaryBlock, /DTrack:\s+(https?:\/\/\S+)/m);
+
+  return {
+    project,
+    components: componentsStr ? Number(componentsStr) : null,
+    groups: groupsStr ? groupsStr.split(",").map((g) => g.trim()).filter(Boolean) : [],
+    buildLabel,
+    dtrackUrl,
+    bomUploaded,
+    bomToken,
+  };
+}
+
+function grabIn(src: string, re: RegExp): string | null {
+  const m = src.match(re);
+  return m ? m[1].trim() : null;
+}
+
+async function fetchConsoleTail(
+  cfg: PluginConfig,
+  job: { id: string; url: string; proxy: string },
+  buildNumber: number,
+  tailBytes = 32_768,
+): Promise<string | null> {
+  const headers = jenkinsHeaders(cfg, job.proxy);
+  try {
+    // First request: ask for an out-of-range offset to retrieve the total size header cheaply
+    const probe = await serverFetchText(
+      `${job.url}/${buildNumber}/logText/progressiveText?start=999999999`,
+      headers,
+    );
+    const total = Number(probe.headers["x-text-size"]) || 0;
+    if (!total) return null;
+    const start = Math.max(0, total - tailBytes);
+    const tail = await serverFetchText(
+      `${job.url}/${buildNumber}/logText/progressiveText?start=${start}`,
+      headers,
+    );
+    return tail.text;
+  } catch (err: any) {
+    console.warn(`[backend] Console tail fetch failed for ${job.id}#${buildNumber}: ${err.message}`);
+    return null;
+  }
+}
+
+async function maybeUpdateSbomCache(
+  cfg: PluginConfig,
+  job: { id: string; url: string; proxy: string },
+  jobCache: JenkinsJobCache,
+): Promise<SbomSummaryCache | null> {
+  // Prefer the in-flight build so we can flip bomUploaded mid-build.
+  // Fall back to lastCompletedBuild when nothing is currently running.
+  const target = jobCache.lastBuild?.number ? jobCache.lastBuild : jobCache.lastCompletedBuild;
+  if (!target?.number) return null;
+
+  const existing = cacheGet<SbomSummaryCache>("sbom:latest");
+
+  // Skip if existing entry is for this exact build AND is already "complete"
+  // (SUMMARY parsed → has a project name). For in-flight builds we always
+  // re-poll so a "BOM uploaded" line that just appeared can land in the cache.
+  if (existing && existing.buildNumber === target.number && existing.project) {
+    return existing;
+  }
+
+  const text = await fetchConsoleTail(cfg, job, target.number);
+  if (!text) return existing;
+
+  const parsed = parseSbomSummary(text);
+  if (!parsed) return existing;
+
+  // Don't downgrade a newer build's complete entry with an older partial.
+  if (existing && existing.buildNumber > target.number) return existing;
+
+  const entry: SbomSummaryCache = {
+    buildNumber: target.number,
+    buildUrl: target.url ?? `${job.url}/${target.number}/`,
+    builtAt: typeof target.timestamp === "number" ? target.timestamp : undefined,
+    parsedAt: Date.now(),
+    ...parsed,
+  };
+  // Short TTL when we only got the partial (BOM uploaded but no SUMMARY yet)
+  // so we keep re-polling until the rest of the SUMMARY block prints.
+  const ttl = parsed.project ? cfg.cacheTtlMs * 60 : cfg.cacheTtlMs;
+  cacheSet("sbom:latest", entry, ttl);
+  return entry;
+}
+
+// ─── S3 CVE-output poller ───────────────────────────────────────────────────
+//
+// Polls the configured S3 bucket/prefix for the most-recently-uploaded
+// CVE delta file. The dashboard uses the resulting `lastModifiedMs` to
+// detect "the SBOM/CVE workflow for the current pipeline run has reached
+// S3" — which is the gate that unblocks the Impact Analyser workflow.
+
+let s3Client: S3Client | null = null;
+let s3ClientKey = "";
+
+function getS3Client(cfg: PluginConfig): S3Client | null {
+  const { region, accessKeyId, secretAccessKey, bucket } = cfg.s3;
+  if (!bucket || !accessKeyId || !secretAccessKey) return null;
+  const key = `${region}|${accessKeyId}`;
+  if (s3Client && s3ClientKey === key) return s3Client;
+  s3Client = new S3Client({
+    region,
+    credentials: { accessKeyId, secretAccessKey },
+  });
+  s3ClientKey = key;
+  return s3Client;
+}
+
+async function pollS3Cve(cfg: PluginConfig): Promise<S3CveCache | null> {
+  const circuitKey = "s3:cve";
+  if (shouldSkip(circuitKey)) return cacheGet<S3CveCache>("s3:cve-latest");
+
+  const { bucket, prefix } = cfg.s3;
+  const baseEntry: S3CveCache = {
+    key: null,
+    lastModifiedMs: 0,
+    etag: null,
+    fetchedAt: Date.now(),
+    bucket,
+    prefix,
+    configured: false,
+    totalCount: 0,
+    error: null,
+  };
+
+  const client = getS3Client(cfg);
+  if (!client) {
+    cacheSet("s3:cve-latest", baseEntry, cfg.s3.pollIntervalMs * 3);
+    return baseEntry;
+  }
+
+  try {
+    let latestKey: string | null = null;
+    let latestMs = 0;
+    let latestEtag: string | null = null;
+    let totalCount = 0;
+    let continuationToken: string | undefined;
+
+    // ListObjectsV2 returns up to 1000 keys per call. We paginate but cap
+    // total pages at 5 (5000 keys) to bound runtime.
+    for (let page = 0; page < 5; page++) {
+      const resp = await client.send(new ListObjectsV2Command({
+        Bucket: bucket,
+        Prefix: prefix || undefined,
+        ContinuationToken: continuationToken,
+      }));
+      for (const obj of resp.Contents ?? []) {
+        const key = obj.Key ?? "";
+        if (!key || key.endsWith("/")) continue;
+        const lower = key.toLowerCase();
+        if (!lower.endsWith(".csv") && !lower.endsWith(".json")) continue;
+        totalCount++;
+        const ms = obj.LastModified ? obj.LastModified.getTime() : 0;
+        if (ms > latestMs) {
+          latestMs = ms;
+          latestKey = key;
+          latestEtag = (obj.ETag ?? "").replace(/"/g, "") || null;
+        }
+      }
+      if (!resp.IsTruncated || !resp.NextContinuationToken) break;
+      continuationToken = resp.NextContinuationToken;
+    }
+
+    const entry: S3CveCache = {
+      key: latestKey,
+      lastModifiedMs: latestMs,
+      etag: latestEtag,
+      fetchedAt: Date.now(),
+      bucket,
+      prefix,
+      configured: true,
+      totalCount,
+      error: null,
+    };
+    cacheSet("s3:cve-latest", entry, cfg.s3.pollIntervalMs * 3);
+    recordSuccess(circuitKey);
+    return entry;
+  } catch (err: any) {
+    recordFailure(circuitKey);
+    const prev = cacheGet<S3CveCache>("s3:cve-latest");
+    const entry: S3CveCache = {
+      ...(prev ?? baseEntry),
+      configured: true,
+      fetchedAt: Date.now(),
+      error: err?.message ?? String(err),
+    };
+    cacheSet("s3:cve-latest", entry, cfg.s3.pollIntervalMs * 3);
+    console.warn(`[backend] S3 CVE poll failed: ${entry.error}`);
+    return entry;
   }
 }
 
@@ -385,6 +726,26 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 let rpPollTimer: ReturnType<typeof setInterval> | null = null;
 let firstPollReady: Promise<void> = Promise.resolve();
 
+// On-demand handles exposed by startPollers() so HTML serves and WS
+// connects can force a fresh poll instead of returning stale cache.
+let runPollJenkinsOnce: (() => Promise<void>) | null = null;
+let lastJenkinsPollAt = 0;
+let inflightJenkinsPoll: Promise<void> | null = null;
+
+/**
+ * Force a fresh Jenkins poll, deduped to one in-flight call at a time.
+ * Capped wait so HTML serve / WS connect never blocks for more than maxWaitMs.
+ */
+async function ensureFreshJenkins(maxWaitMs: number, maxAgeMs: number): Promise<void> {
+  if (!runPollJenkinsOnce) return;
+  if (Date.now() - lastJenkinsPollAt < maxAgeMs) return;
+  const poll = inflightJenkinsPoll ?? (inflightJenkinsPoll = runPollJenkinsOnce().finally(() => {
+    inflightJenkinsPoll = null;
+    lastJenkinsPollAt = Date.now();
+  }));
+  await Promise.race([poll, new Promise<void>((r) => setTimeout(r, maxWaitMs))]);
+}
+
 function startPollers(cfg: PluginConfig): void {
   // Jenkins poller — every pollIntervalMs
   const pollJenkins = async () => {
@@ -400,6 +761,20 @@ function startPollers(cfg: PluginConfig): void {
               prev.lastBuild?.building !== data.lastBuild?.building ||
               prev.lastBuild?.result !== data.lastBuild?.result)) {
             broadcast("jenkins:update", { jobId: job.id, ...data });
+          }
+
+          // Side-effect: parse SBOM SUMMARY from CVE-BUILD console (job id e-nios-build)
+          if (job.id === "e-nios-build") {
+            const prevSbom = cacheGet<SbomSummaryCache>("sbom:latest");
+            const updated = await maybeUpdateSbomCache(cfg, job, data);
+            if (updated && (
+              !prevSbom ||
+              prevSbom.buildNumber !== updated.buildNumber ||
+              prevSbom.bomUploaded !== updated.bomUploaded ||
+              (!prevSbom.project && updated.project)
+            )) {
+              broadcast("sbom:update", updated);
+            }
           }
         } else {
           // Poll failed — keep stale data alive much longer so the UI never loses it
@@ -465,7 +840,7 @@ function startPollers(cfg: PluginConfig): void {
     if (shouldSkip(circuitKey)) return;
 
     const base = cfg.impactApiUrl.replace(/\/+$/, "");
-    const result: Record<string, any> = { healthy: null, health: null, indexes: null, latestRun: null };
+    const result: Record<string, any> = { healthy: null, health: null, indexes: null, latestRun: null, cveSummary: null };
     try {
       result.health = await serverFetch(`${base}/health`);
       result.healthy = true;
@@ -482,6 +857,52 @@ function startPollers(cfg: PluginConfig): void {
       result.latestRun = await serverFetch(`${base}/runs/latest`);
     } catch { /* ignore */ }
 
+    // CVE aggregate summary for the latest run
+    const runId = result.latestRun?.run_id ?? result.latestRun?.id;
+    if (runId) {
+      const prevSummary = cacheGet<ImpactCveSummary>(`impact:cves:${runId}`);
+      // Reuse cached summary for a short window — CVE list rarely changes mid-run
+      if (prevSummary && Date.now() - prevSummary.fetchedAt < cfg.cacheTtlMs * 4) {
+        result.cveSummary = prevSummary;
+      } else {
+        try {
+          const cvesData = await serverFetch(`${base}/runs/${runId}/cves`);
+          const list: any[] = Array.isArray(cvesData) ? cvesData : (cvesData?.cves ?? cvesData?.items ?? []);
+          const summary: ImpactCveSummary = {
+            runId,
+            total: list.length,
+            withDecision: 0,
+            withoutDecision: 0,
+            bySeverity: {},
+            byVerdict: {},
+            byStatus: {},
+            fetchedAt: Date.now(),
+          };
+          for (const c of list) {
+            const sev = String(c?.severity ?? c?.cvss_severity ?? "UNKNOWN").toUpperCase();
+            summary.bySeverity[sev] = (summary.bySeverity[sev] ?? 0) + 1;
+
+            const decision = c?.decision ?? c?.final_decision ?? c?.verdict ?? null;
+            const verdict = c?.verdict ?? decision?.verdict ?? (typeof decision === "string" ? decision : null);
+            if (verdict) {
+              const v = String(verdict).toUpperCase();
+              summary.byVerdict[v] = (summary.byVerdict[v] ?? 0) + 1;
+              summary.withDecision++;
+            } else {
+              summary.withoutDecision++;
+            }
+
+            const status = String(c?.status ?? c?.state ?? "").toUpperCase();
+            if (status) summary.byStatus[status] = (summary.byStatus[status] ?? 0) + 1;
+          }
+          cacheSet(`impact:cves:${runId}`, summary, cfg.cacheTtlMs * 4);
+          result.cveSummary = summary;
+        } catch (err: any) {
+          console.warn(`[backend] Impact CVE summary fetch failed for ${runId}: ${err.message}`);
+        }
+      }
+    }
+
     const prev = cacheGet("impact:status");
     cacheSet("impact:status", result, cfg.cacheTtlMs);
     if (JSON.stringify(prev) !== JSON.stringify(result)) {
@@ -489,16 +910,41 @@ function startPollers(cfg: PluginConfig): void {
     }
   };
 
+  // S3 CVE poller — runs at its own (slower) cadence. Broadcasts when the
+  // latest object's key/lastModified changes.
+  const pollS3 = async () => {
+    const prev = cacheGet<S3CveCache>("s3:cve-latest");
+    const data = await pollS3Cve(cfg);
+    if (!data) return;
+    if (
+      !prev
+      || prev.key !== data.key
+      || prev.lastModifiedMs !== data.lastModifiedMs
+      || prev.configured !== data.configured
+    ) {
+      broadcast("s3:update", data);
+    }
+  };
+
   // Run first poll eagerly — cache is warm by the time browser requests arrive
-  firstPollReady = Promise.allSettled([pollJenkins(), pollImpact()]).then(() => {
+  firstPollReady = Promise.allSettled([pollJenkins(), pollImpact(), pollS3()]).then(() => {
+    lastJenkinsPollAt = Date.now();
     pollRP(cfg);
   });
 
-  pollTimer = setInterval(pollJenkins, cfg.pollIntervalMs);
+  // Expose for on-demand refresh from HTML serve / WS connect handlers
+  runPollJenkinsOnce = async () => { await pollJenkins(); };
+
+  pollTimer = setInterval(() => {
+    pollJenkins().finally(() => { lastJenkinsPollAt = Date.now(); });
+  }, cfg.pollIntervalMs);
   rpPollTimer = setInterval(() => pollRP(cfg), cfg.rpCacheTtlMs);
   const impactTimer = setInterval(pollImpact, cfg.pollIntervalMs);
+  const s3Timer = setInterval(pollS3, cfg.s3.pollIntervalMs);
 
-  console.log(`[backend] Pollers started — Jenkins every ${cfg.pollIntervalMs}ms, RP every ${cfg.rpCacheTtlMs}ms`);
+  console.log(
+    `[backend] Pollers started — Jenkins ${cfg.pollIntervalMs}ms, RP ${cfg.rpCacheTtlMs}ms, S3 ${cfg.s3.pollIntervalMs}ms${cfg.s3.bucket ? ` (bucket=${cfg.s3.bucket})` : " (S3 not configured)"}`,
+  );
 }
 
 function stopPollers(): void {
@@ -506,6 +952,201 @@ function stopPollers(): void {
   if (rpPollTimer) clearInterval(rpPollTimer);
   pollTimer = null;
   rpPollTimer = null;
+}
+
+// ─── Jira: upload current-run artifacts ─────────────────────────────────────
+//
+// Hard caps prevent accidental bulk uploads. The impact-analyser job
+// alone can emit ~100k tiny script files; without these limits, hitting
+// the upload button would DoS Jira and burn through attachment quota.
+
+const JIRA_MAX_FILES = 25;
+const JIRA_MAX_FILE_BYTES = 10 * 1024 * 1024;        // 10 MB per file
+const JIRA_MAX_TOTAL_BYTES = 50 * 1024 * 1024;       // 50 MB total per upload
+const JIRA_FETCH_TIMEOUT_MS = 30_000;
+
+interface JiraUploadResult {
+  uploaded: { fileName: string; size: number; jobId: string }[];
+  skipped: { fileName: string; reason: string; jobId: string }[];
+  totalBytes: number;
+  durationMs: number;
+}
+
+async function handleJiraUpload(req: IncomingMessage, res: ServerResponse, cfg: PluginConfig): Promise<void> {
+  const started = Date.now();
+  res.setHeader("Content-Type", "application/json");
+
+  if (!cfg.jiraEmail || !cfg.jiraToken) {
+    res.statusCode = 400;
+    res.end(JSON.stringify({
+      ok: false,
+      error: "Jira not configured. Set JIRA_EMAIL and JIRA_API_TOKEN in .env.local.",
+    }));
+    return;
+  }
+
+  const urlObj = new URL(req.url ?? "", "http://localhost");
+  const issueKey = urlObj.searchParams.get("issue") || cfg.jiraIssueKey;
+  if (!/^[A-Z][A-Z0-9_]+-\d+$/.test(issueKey)) {
+    res.statusCode = 400;
+    res.end(JSON.stringify({ ok: false, error: `Invalid Jira issue key: ${issueKey}` }));
+    return;
+  }
+
+  // Pull current-pipeline artifacts using the same anchor logic the
+  // frontend uses, so what we upload matches what the user sees.
+  const jobs: Record<string, JenkinsJobCache | null> = {};
+  for (const job of cfg.jenkinsJobs) {
+    jobs[job.id] = cacheGet<JenkinsJobCache>(`jenkins:${job.id}`);
+  }
+
+  const orchestratorTs: number = jobs["e-orchestrator"]?.lastBuild?.timestamp ?? 0;
+  const runningTimestamps: number[] = Object.values(jobs)
+    .filter((j): j is JenkinsJobCache => j?.lastBuild?.building === true)
+    .map((j) => j.lastBuild?.timestamp as number)
+    .filter((t) => typeof t === "number" && t > 0);
+  const anchorCandidates: number[] = [];
+  if (orchestratorTs > 0) anchorCandidates.push(orchestratorTs);
+  if (runningTimestamps.length) anchorCandidates.push(Math.min(...runningTimestamps));
+  const pipelineStartTs = anchorCandidates.length ? Math.min(...anchorCandidates) : 0;
+
+  // Build a flat candidate list with job ID + auth proxy so we can fetch.
+  type Candidate = {
+    jobId: string;
+    proxy: string;
+    fileName: string;
+    relativePath: string;
+    downloadUrl: string;
+  };
+  const candidates: Candidate[] = [];
+  for (const job of cfg.jenkinsJobs) {
+    const cached = jobs[job.id];
+    if (!cached?.artifacts?.length) continue;
+    const buildTs: number = cached.lastBuild?.timestamp ?? 0;
+    if (job.id !== "e-orchestrator" && pipelineStartTs > 0 && buildTs < pipelineStartTs) {
+      continue;
+    }
+    for (const a of cached.artifacts) {
+      candidates.push({
+        jobId: job.id,
+        proxy: job.proxy,
+        fileName: a.fileName,
+        relativePath: a.relativePath,
+        downloadUrl: a.downloadUrl,
+      });
+    }
+  }
+
+  if (candidates.length === 0) {
+    res.statusCode = 200;
+    res.end(JSON.stringify({
+      ok: true,
+      issueKey,
+      result: { uploaded: [], skipped: [], totalBytes: 0, durationMs: Date.now() - started },
+      note: "No artifacts found for the current pipeline run.",
+    }));
+    return;
+  }
+
+  // Refuse outright if the current run produced a runaway artifact count.
+  // The cap is enforced PER UPLOAD anyway, but a 100k-file run is almost
+  // certainly impact-analyser leftovers we should never upload.
+  const HARD_CANDIDATE_LIMIT = 500;
+  if (candidates.length > HARD_CANDIDATE_LIMIT) {
+    res.statusCode = 400;
+    res.end(JSON.stringify({
+      ok: false,
+      error: `Refusing to upload: ${candidates.length} candidate artifacts exceeds safety limit of ${HARD_CANDIDATE_LIMIT}. ` +
+             `This usually means impact-analyser output is included \u2014 narrow the run filter first.`,
+    }));
+    return;
+  }
+
+  const result: JiraUploadResult = { uploaded: [], skipped: [], totalBytes: 0, durationMs: 0 };
+  const jiraAttachUrl = `${cfg.jiraBaseUrl.replace(/\/+$/, "")}/rest/api/3/issue/${encodeURIComponent(issueKey)}/attachments`;
+  const jiraAuth = "Basic " + Buffer.from(`${cfg.jiraEmail}:${cfg.jiraToken}`).toString("base64");
+
+  for (const c of candidates) {
+    if (result.uploaded.length >= JIRA_MAX_FILES) {
+      result.skipped.push({ fileName: c.fileName, reason: `max ${JIRA_MAX_FILES} files reached`, jobId: c.jobId });
+      continue;
+    }
+    if (result.totalBytes >= JIRA_MAX_TOTAL_BYTES) {
+      result.skipped.push({ fileName: c.fileName, reason: `total ${(JIRA_MAX_TOTAL_BYTES/1024/1024)|0} MB cap reached`, jobId: c.jobId });
+      continue;
+    }
+
+    const jenkinsHdrs = jenkinsHeaders(cfg, c.proxy);
+
+    // Step 1: HEAD to learn size cheaply. Skip oversized files without
+    // downloading them (this is the whole point of the cap).
+    let size = -1;
+    try {
+      const head = await fetch(c.downloadUrl, { method: "HEAD", headers: jenkinsHdrs, signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS) });
+      if (head.ok) {
+        const len = head.headers.get("content-length");
+        if (len) size = Number(len);
+      }
+    } catch { /* fall through; we'll check size after GET */ }
+
+    if (size > JIRA_MAX_FILE_BYTES) {
+      result.skipped.push({ fileName: c.fileName, reason: `file ${(size/1024/1024).toFixed(1)} MB exceeds per-file cap`, jobId: c.jobId });
+      continue;
+    }
+
+    // Step 2: download
+    let bytes: ArrayBuffer;
+    try {
+      const dl = await fetch(c.downloadUrl, { headers: jenkinsHdrs, signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS) });
+      if (!dl.ok) {
+        result.skipped.push({ fileName: c.fileName, reason: `download failed: ${dl.status} ${dl.statusText}`, jobId: c.jobId });
+        continue;
+      }
+      bytes = await dl.arrayBuffer();
+    } catch (err: any) {
+      result.skipped.push({ fileName: c.fileName, reason: `download error: ${err?.message ?? err}`, jobId: c.jobId });
+      continue;
+    }
+
+    // Enforce caps post-download in case HEAD lied / was unavailable
+    if (bytes.byteLength > JIRA_MAX_FILE_BYTES) {
+      result.skipped.push({ fileName: c.fileName, reason: `file ${(bytes.byteLength/1024/1024).toFixed(1)} MB exceeds per-file cap`, jobId: c.jobId });
+      continue;
+    }
+    if (result.totalBytes + bytes.byteLength > JIRA_MAX_TOTAL_BYTES) {
+      result.skipped.push({ fileName: c.fileName, reason: `would exceed total ${(JIRA_MAX_TOTAL_BYTES/1024/1024)|0} MB cap`, jobId: c.jobId });
+      continue;
+    }
+
+    // Step 3: upload to Jira via multipart form
+    try {
+      const form = new FormData();
+      form.append("file", new Blob([bytes]), c.fileName);
+      const up = await fetch(jiraAttachUrl, {
+        method: "POST",
+        headers: {
+          Authorization: jiraAuth,
+          "X-Atlassian-Token": "no-check",
+          Accept: "application/json",
+        },
+        body: form,
+        signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS),
+      });
+      if (!up.ok) {
+        const errBody = await up.text().catch(() => "");
+        result.skipped.push({ fileName: c.fileName, reason: `Jira ${up.status}: ${errBody.slice(0, 120)}`, jobId: c.jobId });
+        continue;
+      }
+      result.uploaded.push({ fileName: c.fileName, size: bytes.byteLength, jobId: c.jobId });
+      result.totalBytes += bytes.byteLength;
+    } catch (err: any) {
+      result.skipped.push({ fileName: c.fileName, reason: `upload error: ${err?.message ?? err}`, jobId: c.jobId });
+    }
+  }
+
+  result.durationMs = Date.now() - started;
+  res.statusCode = 200;
+  res.end(JSON.stringify({ ok: true, issueKey, jiraBaseUrl: cfg.jiraBaseUrl, result }));
 }
 
 // ─── REST routes (served from cache) ────────────────────────────────────────
@@ -589,6 +1230,22 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
     return true;
   }
 
+  // GET /_api/sbom — cached SBOM upload summary (from CVE-BUILD console)
+  if (path === "sbom" || path === "sbom/") {
+    const data = cacheGet<SbomSummaryCache>("sbom:latest");
+    res.end(JSON.stringify({ ok: !!data, data }));
+    return true;
+  }
+
+  // GET /_api/s3-cve — cached S3 CVE-output poller state. Returns the
+  // newest matching object's key + lastModified so the frontend can decide
+  // whether the SBOM/CVE workflow for the current pipeline run has reached S3.
+  if (path === "s3-cve" || path === "s3-cve/") {
+    const data = cacheGet<S3CveCache>("s3:cve-latest");
+    res.end(JSON.stringify({ ok: !!data, data }));
+    return true;
+  }
+
   // GET /_api/all — single request returns ALL cached data (fast initial load)
   if (path === "all" || path === "all/") {
     // Wait for first poll to complete (with a short timeout) so the first
@@ -602,13 +1259,25 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
     const rp = cacheGet("rp:latest");
     const rpBranch = cacheGet<string>("rp:branch-tag-used") ?? "";
     const impact = cacheGet("impact:status");
+    const sbom = cacheGet<SbomSummaryCache>("sbom:latest");
+    const s3 = cacheGet<S3CveCache>("s3:cve-latest");
     res.end(JSON.stringify({
       ok: true,
       ts: Date.now(),
       jenkins: { jobs },
       rp: { branchTag: rpBranch, ...(rp as any) },
       impact: impact ?? null,
+      sbom: sbom ?? null,
+      s3Cve: s3 ?? null,
     }));
+    return true;
+  }
+
+  // POST /_api/jira/upload-current-run — uploads current-pipeline-run
+  // artifacts to the configured Jira issue. Hard-capped to prevent
+  // accidental bulk uploads (e.g. impact-analyser's ~100k file dumps).
+  if (path === "jira/upload-current-run" && req.method === "POST") {
+    await handleJiraUpload(req, res, cfg);
     return true;
   }
 
@@ -670,7 +1339,7 @@ function streamConsole(
       }
 
       if (more && !closed) {
-        setTimeout(poll, 1000); // Stream at 1s intervals (much faster than 5s polling)
+        setTimeout(poll, 10_000); // Stream console at 10s intervals
       } else {
         res.write(`data: ${JSON.stringify({ done: true, offset })}\n\n`);
         res.end();
@@ -702,18 +1371,37 @@ export function backendPlugin(): Plugin {
       wss = new WebSocketServer({ noServer: true });
       wss.on("connection", (ws) => {
         wsClients.add(ws);
-        // Send current cached state immediately
+        // Send current cached state immediately — zero-latency hydration
         const jobs: Record<string, any> = {};
         for (const job of cfg.jenkinsJobs) {
           jobs[job.id] = cacheGet(`jenkins:${job.id}`);
         }
         ws.send(JSON.stringify({
           type: "init",
-          payload: { jenkins: jobs, rp: cacheGet("rp:latest"), branchTag: cacheGet("rp:branch-tag-used") },
+          payload: {
+            jenkins: jobs,
+            rp: cacheGet("rp:latest"),
+            branchTag: cacheGet("rp:branch-tag-used"),
+            impact: cacheGet("impact:status"),
+            sbom: cacheGet("sbom:latest"),
+            s3Cve: cacheGet("s3:cve-latest"),
+          },
           ts: Date.now(),
         }));
         ws.on("close", () => wsClients.delete(ws));
         ws.on("error", () => wsClients.delete(ws));
+
+        // Kick a fresh poll in the background — if the cache was stale or a
+        // pipeline is running, the subsequent broadcast() lands on this
+        // client within ~1s, eliminating the stale-flash on page refresh.
+        const anyRunning = Object.values(jobs).some(
+          (j: any) => j?.lastBuild?.building === true,
+        );
+        const cacheAge = Date.now() - lastJenkinsPollAt;
+        if (anyRunning || cacheAge > cfg.pollIntervalMs) {
+          ensureFreshJenkins(2500, anyRunning ? 0 : cfg.pollIntervalMs)
+            .catch(() => { /* best-effort */ });
+        }
       });
 
       // Intercept upgrade BEFORE Vite's HMR WebSocket gets it
@@ -757,20 +1445,43 @@ export function backendPlugin(): Plugin {
     async transformIndexHtml() {
       await Promise.race([firstPollReady, new Promise((r) => setTimeout(r, 8000))]);
 
+      // Always force a fresh Jenkins poll before serving HTML so the inline
+      // __PREFETCH_DATA__ (if any) matches reality. Capped at 2.5s.
+      await ensureFreshJenkins(2500, 0);
+
       const jobs: Record<string, JenkinsJobCache | null> = {};
       for (const job of cfg.jenkinsJobs) {
         jobs[job.id] = cacheGet<JenkinsJobCache>(`jenkins:${job.id}`);
       }
+      const anyRunning = Object.values(jobs).some(
+        (j) => j?.lastBuild?.building === true,
+      );
+
+      // When a pipeline run is currently in progress, do NOT inject inline
+      // prefetch data. The frontend will fall back to fetching /_api/all on
+      // mount, guaranteeing the first paint shows live state instead of
+      // anything potentially cached in the HTML.
+      if (anyRunning) {
+        return [];
+      }
+
       const rp = cacheGet("rp:latest");
       const rpBranch = cacheGet<string>("rp:branch-tag-used") ?? "";
       const impact = cacheGet("impact:status");
+      const sbom = cacheGet<SbomSummaryCache>("sbom:latest");
+      const s3Cve = cacheGet<S3CveCache>("s3:cve-latest");
 
+      const cacheAgeMs = lastJenkinsPollAt > 0 ? Date.now() - lastJenkinsPollAt : -1;
       const inlineData = {
         ok: true,
         ts: Date.now(),
+        cacheAgeMs,
+        anyRunning: false,
         jenkins: { jobs },
         rp: { branchTag: rpBranch, ...(rp as any) },
         impact: impact ?? null,
+        sbom: sbom ?? null,
+        s3Cve: s3Cve ?? null,
       };
 
       // Escape </script> in JSON to prevent XSS

@@ -34,7 +34,7 @@ export const config = {
     /** Base URL of the dashboard backend (proxies Jenkins / DTrack / S3). */
     baseUrl: env.VITE_API_BASE_URL ?? "",
     /** How often (ms) the UI polls for run updates when in live mode. */
-    pollIntervalMs: num(env.VITE_POLL_INTERVAL_MS, 5000),
+    pollIntervalMs: num(env.VITE_POLL_INTERVAL_MS, 120_000),
   },
 
   jenkins: {

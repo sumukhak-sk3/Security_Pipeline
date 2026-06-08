@@ -3,11 +3,13 @@ import {
   fetchHealth,
   fetchIndexes,
   fetchLatestRun,
+  fetchRunCves,
   type HealthResponse,
   type IndexInfo,
   type RunInfo,
+  type CveItem,
 } from "../api/impactClient";
-import { useBackendWs } from "./useBackendWs";
+import { useBackendWs, type ImpactCveSummaryPayload } from "./useBackendWs";
 import { awaitPrefetch } from "../api/prefetch";
 import { config } from "../config";
 
@@ -17,6 +19,7 @@ export interface ImpactStatus {
   health: HealthResponse | null;
   indexes: IndexInfo[] | null;    // null = endpoint failed
   latestRun: RunInfo | null;      // null = endpoint failed
+  cveSummary: ImpactCveSummaryPayload | null;
   errors: Record<string, string>; // per-endpoint error messages
   refresh: () => void;
 }
@@ -32,6 +35,7 @@ export function useImpactStatus(): ImpactStatus {
   const [healthy, setHealthy] = useState<boolean | null>(null);
   const [indexes, setIndexes] = useState<IndexInfo[] | null>(null);
   const [latestRun, setLatestRun] = useState<RunInfo | null>(null);
+  const [cveSummary, setCveSummary] = useState<ImpactCveSummaryPayload | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   // Listen for WebSocket push
@@ -39,12 +43,20 @@ export function useImpactStatus(): ImpactStatus {
 
   useEffect(() => {
     if (!wsMsg) return;
-    const data = wsMsg.type === "init" ? null : wsMsg.payload; // init doesn't include impact yet
+    // `init` now carries the cached impact payload under payload.impact
+    type ImpactSnapshot = { healthy?: boolean | null; health?: unknown; indexes?: unknown; latestRun?: unknown; cveSummary?: ImpactCveSummaryPayload | null };
+    let data: ImpactSnapshot | null = null;
+    if (wsMsg.type === "init") {
+      data = (wsMsg.payload as { impact?: ImpactSnapshot | null }).impact ?? null;
+    } else if (wsMsg.type === "impact:update") {
+      data = wsMsg.payload as ImpactSnapshot;
+    }
     if (!data) return;
     setHealthy(data.healthy ?? null);
-    setHealth(data.health ?? null);
-    setIndexes(data.indexes ?? null);
-    setLatestRun(data.latestRun ?? null);
+    setHealth((data.health as HealthResponse) ?? null);
+    setIndexes((data.indexes as IndexInfo[]) ?? null);
+    setLatestRun((data.latestRun as RunInfo) ?? null);
+    setCveSummary(data.cveSummary ?? null);
     setErrors({});
     setLoading(false);
   }, [wsMsg]);
@@ -64,6 +76,7 @@ export function useImpactStatus(): ImpactStatus {
           setHealth(data.health ?? null);
           setIndexes(data.indexes ?? null);
           setLatestRun(data.latestRun ?? null);
+          setCveSummary(data.cveSummary ?? null);
           setErrors({});
           setLoading(false);
           return true;
@@ -77,6 +90,7 @@ export function useImpactStatus(): ImpactStatus {
     // Fallback: direct calls
     const fetchDirect = async () => {
       const errs: Record<string, string> = {};
+      const runHolder: { run: RunInfo | null } = { run: null };
       await Promise.allSettled([
         fetchHealth()
           .then((h) => { if (!cancelled) { setHealth(h); setHealthy(true); } })
@@ -85,9 +99,19 @@ export function useImpactStatus(): ImpactStatus {
           .then((arr) => { if (!cancelled) setIndexes(arr); })
           .catch((e: Error) => { if (!cancelled) { setIndexes(null); errs.indexes = e.message; } }),
         fetchLatestRun()
-          .then((r) => { if (!cancelled) setLatestRun(r); })
+          .then((r) => { if (!cancelled) { setLatestRun(r); runHolder.run = r; } })
           .catch((e: Error) => { if (!cancelled) { setLatestRun(null); errs.latestRun = e.message; } }),
       ]);
+      // CVE summary requires a runId — fetch after latestRun is known
+      const rid = runHolder.run?.run_id ?? runHolder.run?.id;
+      if (rid && !cancelled) {
+        try {
+          const cves = await fetchRunCves(String(rid));
+          if (!cancelled) setCveSummary(summariseCves(String(rid), cves));
+        } catch (e) {
+          if (!cancelled) errs.cves = (e as Error).message;
+        }
+      }
       if (!cancelled) { setErrors(errs); setLoading(false); }
     };
 
@@ -99,7 +123,7 @@ export function useImpactStatus(): ImpactStatus {
   useEffect(() => {
     const ms = config.api.pollIntervalMs;
     if (!ms || ms <= 0) return;
-    const t = setInterval(() => setTick((n) => n + 1), ms * 3);
+    const t = setInterval(() => setTick((n) => n + 1), ms);
     return () => clearInterval(t);
   }, []);
 
@@ -109,7 +133,43 @@ export function useImpactStatus(): ImpactStatus {
     health,
     indexes,
     latestRun,
+    cveSummary,
     errors,
     refresh: () => setTick((n) => n + 1),
   };
+}
+
+/** Aggregate a CVE list (defensive about field shape). */
+function summariseCves(runId: string, list: CveItem[]): ImpactCveSummaryPayload {
+  const out: ImpactCveSummaryPayload = {
+    runId,
+    total: list.length,
+    withDecision: 0,
+    withoutDecision: 0,
+    bySeverity: {},
+    byVerdict: {},
+    byStatus: {},
+    fetchedAt: Date.now(),
+  };
+  for (const c of list) {
+    const sev = String(c?.severity ?? "UNKNOWN").toUpperCase();
+    out.bySeverity[sev] = (out.bySeverity[sev] ?? 0) + 1;
+
+    const dec = c?.decision;
+    const verdict = c?.verdict
+      ?? (typeof dec === "object" && dec ? dec.verdict : (typeof dec === "string" ? dec : null));
+    if (verdict) {
+      const v = String(verdict).toUpperCase();
+      out.byVerdict[v] = (out.byVerdict[v] ?? 0) + 1;
+      out.withDecision++;
+    } else {
+      out.withoutDecision++;
+    }
+
+    if (c?.status) {
+      const s = String(c.status).toUpperCase();
+      out.byStatus[s] = (out.byStatus[s] ?? 0) + 1;
+    }
+  }
+  return out;
 }
