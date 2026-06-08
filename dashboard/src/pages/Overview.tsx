@@ -44,21 +44,14 @@ export default function Overview() {
     return () => { cancelled = true; };
   }, [liveE.status]);
 
-  // Replace E + D with live aggregated state; B keeps mock data for now.
-  // Each workflow independently shows its own live state.
-  const workflows: Workflow[] = run.workflows.map((w) => {
-    if (w.id === "E") return mergeLive(w, liveE);
-    if (w.id === "D") return mergeLive(w, liveD);
-    return w;
-  });
-
-  // Only use live workflows (E + D) for the overall bar — B is still mock data
-  const liveWorkflows = workflows.filter((w) => w.id === "E" || w.id === "D");
-
-  // Pipeline-aware progress: when E is actively running, D hasn't been
-  // triggered yet in this run — its stale historical 100% shouldn't inflate
-  // the overall bar.  We check if D's latest build predates the current
-  // orchestrator run; if so it contributes 0%.
+  // ----------------------------------------------------------------
+  // Cross-workflow pipeline awareness
+  // Pipeline chain: E → B → D
+  // When E is running, B and D haven't been triggered yet in this run.
+  // When B is running (future), D hasn't been triggered yet.
+  // We detect staleness so downstream workflows show "pending" instead
+  // of misleading historical "success" data.
+  // ----------------------------------------------------------------
   const eAnyBuilding = liveE.jobs.some((j) => j.headline?.building === true);
   const pipelineStartTs =
     liveE.jobs.find((j) => j.id === "e-orchestrator")?.headline?.timestamp ?? 0;
@@ -66,12 +59,43 @@ export default function Overview() {
   /** Is workflow D stale (not yet triggered in the current pipeline run)? */
   const dIsStale = (() => {
     if (!eAnyBuilding || pipelineStartTs === 0) return false;
-    // If D itself is building, it's clearly current
     if (liveD.jobs.some((j) => j.headline?.building)) return false;
-    // Compare D's latest build timestamp to pipeline start
     const dLatest = Math.max(...liveD.jobs.map((j) => j.headline?.timestamp ?? 0));
     return dLatest < pipelineStartTs;
   })();
+
+  /** Is workflow B stale? B doesn't have live data yet — if E is running, B
+   *  definitely hasn't been triggered in this run. */
+  const bIsStale = eAnyBuilding && pipelineStartTs > 0;
+
+  // Replace E + D with live aggregated state; B keeps mock data for now.
+  // Then apply cross-workflow staleness: if upstream is still running,
+  // force downstream to show "pending" with 0% progress.
+  const workflows: Workflow[] = run.workflows.map((w) => {
+    if (w.id === "E") return mergeLive(w, liveE);
+    if (w.id === "D") {
+      const merged = mergeLive(w, liveD);
+      if (dIsStale) return {
+        ...merged,
+        status: "pending" as const,
+        progress: 0,
+        jobs: merged.jobs.map((j) => ({ ...j, status: "pending" as const, progress: 0 })),
+      };
+      return merged;
+    }
+    if (w.id === "B" && bIsStale) {
+      return {
+        ...w,
+        status: "pending" as const,
+        progress: 0,
+        jobs: w.jobs.map((j) => ({ ...j, status: "pending" as const, progress: 0 })),
+      };
+    }
+    return w;
+  });
+
+  // Only use live workflows (E + D) for the overall bar — B is still mock data
+  const liveWorkflows = workflows.filter((w) => w.id === "E" || w.id === "D");
 
   const totalProgress = (() => {
     if (liveWorkflows.length === 0) return 0;
@@ -83,7 +107,6 @@ export default function Overview() {
   })();
 
   // Derive overall pipeline status from live workflow statuses only
-  // When D is stale, treat it as "pending" so it doesn't falsely show success
   const overallStatus = liveWorkflows.some((w) => w.status === "failed")
     ? "failed"
     : liveWorkflows.some((w) => w.status === "running")
