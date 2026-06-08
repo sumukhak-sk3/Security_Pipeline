@@ -132,6 +132,9 @@ export function useWorkflowLiveSummary(jobs: JobSpec[]): LiveWorkflowSummary {
         const results: LiveJobSummary[] = jobs.map((spec) => {
           const cached = allCached[spec.id];
           if (!cached) {
+            // Keep previous data if cache has no entry (backend circuit open)
+            const prev = items.find((i) => i.id === spec.id);
+            if (prev && prev.job) return prev;
             return {
               id: spec.id, title: spec.title, jenkinsUrl: spec.jenkinsUrl,
               job: null, headline: null, stages: null, status: "pending" as Status, progress: 0, error: null,
@@ -178,6 +181,9 @@ export function useWorkflowLiveSummary(jobs: JobSpec[]): LiveWorkflowSummary {
               status: buildStatus(headline), progress: computeProgress(headline, stages), error: null,
             };
           } catch (e) {
+            // Keep previous data on failure instead of resetting to pending
+            const prev = items.find((i) => i.id === spec.id);
+            if (prev && prev.job) return { ...prev, error: (e as Error).message };
             return {
               id: spec.id, title: spec.title, jenkinsUrl: spec.jenkinsUrl,
               job: null, headline: null, stages: null, status: "pending", progress: 0, error: (e as Error).message,

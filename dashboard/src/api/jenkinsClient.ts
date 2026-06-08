@@ -101,7 +101,7 @@ export async function fetchJob(jobUrl: string): Promise<JenkinsJob> {
   const proxied = toProxyUrl(jobUrl);
   if (!proxied) throw new Error("Job URL not configured");
   const url = `${proxied}/api/json?tree=${encodeURIComponent(JOB_TREE)}`;
-  const res = await fetch(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(10_000) });
+  const res = await fetch(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(25_000) });
   if (!res.ok) {
     throw new Error(`Jenkins ${res.status} ${res.statusText}`);
   }
@@ -120,7 +120,7 @@ export async function fetchRunStages(
   if (!proxied) return null;
   const url = `${proxied}/${buildNumber}/wfapi/describe`;
   try {
-    const res = await fetch(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(10_000) });
+    const res = await fetch(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(25_000) });
     if (!res.ok) return null;
     return (await res.json()) as JenkinsRunDescribe;
   } catch {

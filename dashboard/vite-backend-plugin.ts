@@ -91,8 +91,8 @@ interface CircuitState {
 
 const circuits = new Map<string, CircuitState>();
 const BASE_BACKOFF_MS = 5000;
-const MAX_BACKOFF_MS = 300_000; // 5 minutes max
-const FAILURE_THRESHOLD = 3;
+const MAX_BACKOFF_MS = 60_000; // 1 minute max (was 5 min — too aggressive for flaky networks)
+const FAILURE_THRESHOLD = 5;
 
 function getCircuit(key: string): CircuitState {
   if (!circuits.has(key)) {
@@ -144,7 +144,7 @@ function dedup<T>(key: string, fn: () => Promise<T>): Promise<T> {
 
 // ─── HTTP fetch helper (server-side, with timeout) ──────────────────────────
 
-const FETCH_TIMEOUT_MS = 10_000;
+const FETCH_TIMEOUT_MS = 20_000;
 
 async function serverFetch(url: string, headers: Record<string, string> = {}): Promise<any> {
   const res = await fetch(url, {
@@ -383,6 +383,7 @@ function broadcast(type: string, payload: unknown): void {
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let rpPollTimer: ReturnType<typeof setInterval> | null = null;
+let firstPollReady: Promise<void> = Promise.resolve();
 
 function startPollers(cfg: PluginConfig): void {
   // Jenkins poller — every pollIntervalMs
@@ -401,9 +402,9 @@ function startPollers(cfg: PluginConfig): void {
             broadcast("jenkins:update", { jobId: job.id, ...data });
           }
         } else {
-          // Poll failed — extend the existing cache entry so stale data stays visible
+          // Poll failed — keep stale data alive much longer so the UI never loses it
           const prev = cacheGet<JenkinsJobCache>(`jenkins:${job.id}`);
-          if (prev) cacheSet(`jenkins:${job.id}`, prev, cfg.cacheTtlMs);
+          if (prev) cacheSet(`jenkins:${job.id}`, prev, cfg.cacheTtlMs * 30); // ~4 min stale window
         }
         return { id: job.id, data: data ?? cacheGet<JenkinsJobCache>(`jenkins:${job.id}`) };
       }),
@@ -489,9 +490,9 @@ function startPollers(cfg: PluginConfig): void {
   };
 
   // Run first poll eagerly — cache is warm by the time browser requests arrive
-  const firstPoll = Promise.allSettled([pollJenkins(), pollImpact()]);
-  // RP needs branch from Jenkins, so chain after first Jenkins poll
-  firstPoll.then(() => pollRP(cfg));
+  firstPollReady = Promise.allSettled([pollJenkins(), pollImpact()]).then(() => {
+    pollRP(cfg);
+  });
 
   pollTimer = setInterval(pollJenkins, cfg.pollIntervalMs);
   rpPollTimer = setInterval(() => pollRP(cfg), cfg.rpCacheTtlMs);
@@ -509,7 +510,7 @@ function stopPollers(): void {
 
 // ─── REST routes (served from cache) ────────────────────────────────────────
 
-function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: PluginConfig): boolean {
+async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: PluginConfig): Promise<boolean> {
   const url = req.url ?? "";
 
   if (!url.startsWith("/_api/")) return false;
@@ -590,6 +591,10 @@ function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: Plugin
 
   // GET /_api/all — single request returns ALL cached data (fast initial load)
   if (path === "all" || path === "all/") {
+    // Wait for first poll to complete (with a short timeout) so the first
+    // request after server start doesn't return all nulls
+    await Promise.race([firstPollReady, new Promise((r) => setTimeout(r, 8000))]);
+
     const jobs: Record<string, JenkinsJobCache | null> = {};
     for (const job of cfg.jenkinsJobs) {
       jobs[job.id] = cacheGet<JenkinsJobCache>(`jenkins:${job.id}`);
@@ -724,7 +729,12 @@ export function backendPlugin(): Plugin {
       // REST middleware — runs before Vite's proxy
       server.middlewares.use((req, res, next) => {
         if (req.url?.startsWith("/_api/")) {
-          handleApiRequest(req, res, cfg);
+          handleApiRequest(req, res, cfg).catch(() => {
+            if (!res.writableEnded) {
+              res.statusCode = 500;
+              res.end(JSON.stringify({ error: "Internal error" }));
+            }
+          });
         } else {
           next();
         }
@@ -743,7 +753,10 @@ export function backendPlugin(): Plugin {
     },
 
     // Inject cached data directly into HTML — zero-latency initial render
-    transformIndexHtml() {
+    // Wait for first poll to complete so the inline data is fresh (not all nulls)
+    async transformIndexHtml() {
+      await Promise.race([firstPollReady, new Promise((r) => setTimeout(r, 8000))]);
+
       const jobs: Record<string, JenkinsJobCache | null> = {};
       for (const job of cfg.jenkinsJobs) {
         jobs[job.id] = cacheGet<JenkinsJobCache>(`jenkins:${job.id}`);

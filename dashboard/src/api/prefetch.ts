@@ -5,7 +5,9 @@
  * 1. window.__PREFETCH_DATA__ (injected into HTML by backend plugin — instant, zero latency)
  * 2. Fetch /_api/all (fallback if inline data missing)
  *
- * Hooks check this store first before making their own fetch calls.
+ * The initial prefetch is cached for the first render (zero-latency paint).
+ * Subsequent calls to `awaitPrefetch()` always fetch fresh data from the
+ * backend cache so the UI stays in sync with the poller.
  *
  * REVERSIBLE: Delete this file; hooks will fall back to individual fetches.
  */
@@ -25,41 +27,57 @@ export interface PrefetchData {
   ts: number;
 }
 
-let prefetchPromise: Promise<PrefetchData | null> | null = null;
-let prefetchResult: PrefetchData | null = null;
+let initialPromise: Promise<PrefetchData | null> | null = null;
+let initialResolved = false;
+let lastResult: PrefetchData | null = null;
 
 // Check for inline data injected by the backend plugin (synchronous — zero latency)
 if (typeof window !== "undefined" && window.__PREFETCH_DATA__) {
-  prefetchResult = window.__PREFETCH_DATA__;
-  prefetchPromise = Promise.resolve(prefetchResult);
+  lastResult = window.__PREFETCH_DATA__;
+  initialPromise = Promise.resolve(lastResult);
+  initialResolved = true;
 }
 
 /**
- * Trigger the prefetch (call once at app startup, e.g. in main.tsx).
+ * Trigger the initial prefetch (call once at app startup, e.g. in main.tsx).
  * Returns immediately if inline data was available.
  */
 export function startPrefetch(): void {
-  if (prefetchPromise) return;
-  prefetchPromise = fetch("/_api/all", { signal: AbortSignal.timeout(12_000) })
+  if (initialPromise) return;
+  initialPromise = fetchFresh();
+}
+
+function fetchFresh(): Promise<PrefetchData | null> {
+  return fetch("/_api/all", { signal: AbortSignal.timeout(12_000) })
     .then((res) => (res.ok ? res.json() : null))
     .then((data) => {
-      prefetchResult = data;
+      if (data) lastResult = data;
+      initialResolved = true;
       return data;
     })
-    .catch(() => null);
+    .catch(() => {
+      initialResolved = true;
+      return lastResult; // Return stale data on error rather than null
+    });
 }
 
 /**
  * Get the prefetch result. Returns null if not yet loaded.
  */
 export function getPrefetchSync(): PrefetchData | null {
-  return prefetchResult;
+  return lastResult;
 }
 
 /**
- * Await the prefetch result (resolves once the single request completes).
+ * Await the prefetch result.
+ * - First call: returns the initial prefetch (instant if inline data exists).
+ * - Subsequent calls: fetches fresh data from /_api/all each time so the
+ *   UI always reflects the latest poller state.
  */
 export function awaitPrefetch(): Promise<PrefetchData | null> {
-  if (!prefetchPromise) startPrefetch();
-  return prefetchPromise!;
+  if (!initialPromise) startPrefetch();
+  // First render: use the initial (possibly inline) data for zero-latency paint
+  if (!initialResolved) return initialPromise!;
+  // After initial load: always fetch fresh from the backend cache
+  return fetchFresh();
 }
