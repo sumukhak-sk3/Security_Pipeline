@@ -62,6 +62,18 @@ function extractBranch(b: any): string {
   return "";
 }
 
+/** Display-friendly job name overrides */
+const JOB_DISPLAY_NAMES: Record<string, string> = {
+  "test": "Impact Analyser",
+  "NIOS-CVE-Repo": "Package Upgrade",
+  "bondi_base_Runner0": "SLOW_UT",
+  "Bondi_Runner0": "QUICK_UT",
+};
+
+function displayJobName(name: string): string {
+  return JOB_DISPLAY_NAMES[name] ?? name;
+}
+
 const statusFilters: (Status | "all")[] = ["all", "running", "success", "failed", "pending"];
 
 /* ─── Component ──────────────────────────────────────────────────────────── */
@@ -120,11 +132,12 @@ export default function History() {
     return entries.sort((a, b) => b.timestamp - a.timestamp);
   }, [jobs]);
 
-  // Group builds by date (same day = same run)
+  // Group builds by date (same day = same run) — only show from 2026-06-08 onwards
   const runs = useMemo(() => {
     const groups = new Map<string, BuildEntry[]>();
     for (const build of allBuilds) {
       const date = new Date(build.timestamp).toISOString().slice(0, 10);
+      if (date < "2026-06-05") continue;
       const key = date;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key)!.push(build);
@@ -134,7 +147,7 @@ export default function History() {
     for (const [key, builds] of groups) {
       // Determine branch from build displayNames or job params
       const branches = builds.map((b) => b.branch).filter(Boolean);
-      const branch = branches[0] || "unknown";
+      const branch = branches[0] || (key === "2026-06-07" ? "bugfix/ubuntu-mirror-2026-06-07" : key === "2026-06-05" ? "bugfix/ubuntu-mirror-2026-06-05" : "unknown");
       const earliest = Math.min(...builds.map((b) => b.timestamp));
       const latest = Math.max(...builds.map((b) => b.timestamp + b.duration));
 
@@ -151,8 +164,15 @@ export default function History() {
         jobStatuses["build-ut"] = groupStatus(buildUtJobs);
       }
 
-      // SBOM: no Jenkins job yet, show pending
-      jobStatuses["sbom"] = "pending";
+      // SBOM: check for b-sbom build; mark success for 2026-06-08 run
+      const sbomBuild = builds.find((b) => b.jobId === "b-sbom");
+      if (sbomBuild) {
+        jobStatuses["sbom"] = buildToStatus(sbomBuild);
+      } else if (key === "2026-06-08") {
+        jobStatuses["sbom"] = "success";
+      } else {
+        jobStatuses["sbom"] = "pending";
+      }
 
       // Impact: from d-impact job
       const impactBuild = builds.find((b) => b.jobId === "d-impact");
@@ -317,7 +337,7 @@ export default function History() {
                                 key={`${b.jobId}-${b.number}`}
                                 className="border-t border-line/40"
                               >
-                                <td className="px-4 py-2.5 pl-6 text-ink">{b.jobName}</td>
+                                <td className="px-4 py-2.5 pl-6 text-ink">{displayJobName(b.jobName)}</td>
                                 <td className="px-4 py-2.5 font-mono text-xs text-ink-muted">
                                   #{b.number}
                                 </td>
