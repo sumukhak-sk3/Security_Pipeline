@@ -349,38 +349,49 @@ async function pollJenkinsJob(cfg: PluginConfig, job: { id: string; url: string;
     }
 
     // Fetch artifacts list for the headline build (one request, cheap).
-    // d-impact dumps 100k+ internal Python script files alongside the actual
-    // CSV/XLSX impact report — for that job we widen the tree window and
-    // keep ONLY csv/xlsx files. Other jobs keep a generic noise filter.
+    // We narrow the surfaced artifacts to exactly what the dashboard needs:
+    //   • e-orchestrator  → a synthetic console-export text file
+    //   • e-nios-build    → a synthetic SBOM-summary console slice
+    //   • d-impact        → vulnerabilities*.csv + run-*.xlsx report only
+    //   • every other job → no artifacts surfaced
     let artifacts: JenkinsArtifact[] = [];
     let artifactsBuildNumber: number | null = null;
     if (headline?.number) {
-      try {
-        const isImpactJob = job.id === "d-impact";
-        const treeRange = isImpactJob ? "{0,5000}" : "{0,100}";
-        const artData = await serverFetch(
-          `${job.url}/${headline.number}/api/json?tree=${encodeURIComponent(`artifacts[fileName,relativePath]${treeRange}`)}`,
-          headers,
-        );
-        const list: Array<{ fileName?: string; relativePath?: string }> = artData?.artifacts ?? [];
-        // d-impact: strict whitelist (csv/xlsx only) so we surface the
-        // user-visible impact report and nothing else.
-        // Other jobs: drop common build noise (Python sources, caches, etc).
-        const reportRe = /\.(csv|xlsx)$/i;
-        const noiseRe = /(?:^|\/)(?:scripts|index|chunks|shards|cache|tmp|tools)(?:\/|$)|\.(?:py|pyc|pyo|bak)$/i;
-        artifacts = list
-          .filter((a) => a.fileName && a.relativePath)
-          .filter((a) => isImpactJob
-            ? reportRe.test(a.fileName!)
-            : !noiseRe.test(a.relativePath!))
-          .slice(0, 50)
-          .map((a) => ({
-            fileName: a.fileName!,
-            relativePath: a.relativePath!,
-            downloadUrl: `${job.url}/${headline.number}/artifact/${a.relativePath}`,
-          }));
+      if (job.id === "e-orchestrator") {
+        artifacts = [{
+          fileName: `nios-cve-repo-orchestrator-#${headline.number}.txt`,
+          relativePath: `__console__/orchestrator-#${headline.number}.txt`,
+          downloadUrl: `/_api/console-export/${job.id}/${headline.number}?mode=full`,
+        }];
         artifactsBuildNumber = headline.number;
-      } catch { /* ignore */ }
+      } else if (job.id === "e-nios-build") {
+        artifacts = [{
+          fileName: `nios-build-#${headline.number}-sbom-summary.txt`,
+          relativePath: `__console__/nios-build-#${headline.number}-sbom.txt`,
+          downloadUrl: `/_api/console-export/${job.id}/${headline.number}?mode=sbom-tail`,
+        }];
+        artifactsBuildNumber = headline.number;
+      } else if (job.id === "d-impact") {
+        try {
+          const artData = await serverFetch(
+            `${job.url}/${headline.number}/api/json?tree=${encodeURIComponent("artifacts[fileName,relativePath]{0,5000}")}`,
+            headers,
+          );
+          const list: Array<{ fileName?: string; relativePath?: string }> = artData?.artifacts ?? [];
+          const vulnCsvRe = /vulnerab.*\.csv$/i;
+          const xlsxRe = /\.xlsx$/i;
+          artifacts = list
+            .filter((a) => a.fileName && a.relativePath)
+            .filter((a) => vulnCsvRe.test(a.fileName!) || xlsxRe.test(a.fileName!))
+            .slice(0, 10)
+            .map((a) => ({
+              fileName: a.fileName!,
+              relativePath: a.relativePath!,
+              downloadUrl: `${job.url}/${headline.number}/artifact/${a.relativePath}`,
+            }));
+          artifactsBuildNumber = headline.number;
+        } catch { /* ignore */ }
+      }
     }
 
     return {
@@ -479,6 +490,69 @@ async function fetchConsoleTail(
     console.warn(`[backend] Console tail fetch failed for ${job.id}#${buildNumber}: ${err.message}`);
     return null;
   }
+}
+
+/**
+ * Fetch the entire console log via Jenkins' progressiveText endpoint.
+ * Pages through `x-text-size` until the server reports no more data
+ * or we hit `maxBytes` (a safety cap so a runaway log can't OOM us).
+ */
+async function fetchConsoleFull(
+  cfg: PluginConfig,
+  job: { id: string; url: string; proxy: string },
+  buildNumber: number,
+  maxBytes = 4 * 1024 * 1024,
+): Promise<string | null> {
+  const headers = jenkinsHeaders(cfg, job.proxy);
+  let offset = 0;
+  let out = "";
+  try {
+    for (let i = 0; i < 64; i++) {
+      const r = await serverFetchText(
+        `${job.url}/${buildNumber}/logText/progressiveText?start=${offset}`,
+        headers,
+      );
+      if (r.text) out += r.text;
+      const nextOffset = Number(r.headers["x-text-size"]);
+      if (!Number.isFinite(nextOffset) || nextOffset <= offset) break;
+      offset = nextOffset;
+      if (out.length >= maxBytes) {
+        out = out.slice(0, maxBytes);
+        break;
+      }
+      const more = (r.headers["x-more-data"] ?? "").toLowerCase() === "true";
+      if (!more) break;
+    }
+    return out || null;
+  } catch (err: any) {
+    console.warn(`[backend] Console full fetch failed for ${job.id}#${buildNumber}: ${err.message}`);
+    return out || null;
+  }
+}
+
+/**
+ * Slice the NIOS Build console down to the SBOM "STEP 1 … Finished"
+ * summary block the user wants attached to Jira. Falls back to the
+ * tail of the log if the marker isn't found.
+ */
+function sliceSbomSummary(consoleText: string): string {
+  const marker = consoleText.search(/STEP\s*1[:\s]/i);
+  if (marker >= 0) return consoleText.slice(marker);
+  return consoleText.length > 32_768 ? consoleText.slice(-32_768) : consoleText;
+}
+
+async function getConsoleExportText(
+  cfg: PluginConfig,
+  job: { id: string; url: string; proxy: string },
+  buildNumber: number,
+  mode: "full" | "sbom-tail",
+): Promise<string | null> {
+  if (mode === "sbom-tail") {
+    const tail = await fetchConsoleTail(cfg, job, buildNumber, 256 * 1024);
+    if (!tail) return null;
+    return sliceSbomSummary(tail);
+  }
+  return await fetchConsoleFull(cfg, job, buildNumber);
 }
 
 async function maybeUpdateSbomCache(
@@ -1016,12 +1090,16 @@ async function handleJiraUpload(req: IncomingMessage, res: ServerResponse, cfg: 
   const pipelineStartTs = anchorCandidates.length ? Math.min(...anchorCandidates) : 0;
 
   // Build a flat candidate list with job ID + auth proxy so we can fetch.
+  // Synthetic console-export entries (orchestrator full log, nios-build
+  // SBOM-summary slice) carry a `__console__/` relativePath and are handled
+  // inline via getConsoleExportText() instead of an HTTP round-trip.
   type Candidate = {
     jobId: string;
     proxy: string;
     fileName: string;
     relativePath: string;
     downloadUrl: string;
+    buildNumber: number | null;
   };
   const candidates: Candidate[] = [];
   for (const job of cfg.jenkinsJobs) {
@@ -1038,6 +1116,7 @@ async function handleJiraUpload(req: IncomingMessage, res: ServerResponse, cfg: 
         fileName: a.fileName,
         relativePath: a.relativePath,
         downloadUrl: a.downloadUrl,
+        buildNumber: cached.artifactsBuildNumber ?? cached.lastBuild?.number ?? null,
       });
     }
   }
@@ -1083,33 +1162,59 @@ async function handleJiraUpload(req: IncomingMessage, res: ServerResponse, cfg: 
 
     const jenkinsHdrs = jenkinsHeaders(cfg, c.proxy);
 
-    // Step 1: HEAD to learn size cheaply. Skip oversized files without
-    // downloading them (this is the whole point of the cap).
-    let size = -1;
-    try {
-      const head = await fetch(c.downloadUrl, { method: "HEAD", headers: jenkinsHdrs, signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS) });
-      if (head.ok) {
-        const len = head.headers.get("content-length");
-        if (len) size = Number(len);
-      }
-    } catch { /* fall through; we'll check size after GET */ }
-
-    if (size > JIRA_MAX_FILE_BYTES) {
-      result.skipped.push({ fileName: c.fileName, reason: `file ${(size/1024/1024).toFixed(1)} MB exceeds per-file cap`, jobId: c.jobId });
-      continue;
-    }
-
-    // Step 2: download
-    let bytes: ArrayBuffer;
-    try {
-      const dl = await fetch(c.downloadUrl, { headers: jenkinsHdrs, signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS) });
-      if (!dl.ok) {
-        result.skipped.push({ fileName: c.fileName, reason: `download failed: ${dl.status} ${dl.statusText}`, jobId: c.jobId });
+    // Synthetic console-export candidate: render the text inline instead
+    // of round-tripping through our own HTTP endpoint.
+    let bytes: ArrayBuffer | null = null;
+    if (c.relativePath.startsWith("__console__/")) {
+      if (c.buildNumber == null) {
+        result.skipped.push({ fileName: c.fileName, reason: "no build number for console export", jobId: c.jobId });
         continue;
       }
-      bytes = await dl.arrayBuffer();
-    } catch (err: any) {
-      result.skipped.push({ fileName: c.fileName, reason: `download error: ${err?.message ?? err}`, jobId: c.jobId });
+      const job = cfg.jenkinsJobs.find((j) => j.id === c.jobId);
+      if (!job) {
+        result.skipped.push({ fileName: c.fileName, reason: "job not found", jobId: c.jobId });
+        continue;
+      }
+      const mode: "full" | "sbom-tail" = c.relativePath.includes("sbom") ? "sbom-tail" : "full";
+      const text = await getConsoleExportText(cfg, job, c.buildNumber, mode);
+      if (text == null) {
+        result.skipped.push({ fileName: c.fileName, reason: "console fetch failed", jobId: c.jobId });
+        continue;
+      }
+      bytes = new TextEncoder().encode(text).buffer;
+    } else {
+      // Step 1: HEAD to learn size cheaply. Skip oversized files without
+      // downloading them (this is the whole point of the cap).
+      let size = -1;
+      try {
+        const head = await fetch(c.downloadUrl, { method: "HEAD", headers: jenkinsHdrs, signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS) });
+        if (head.ok) {
+          const len = head.headers.get("content-length");
+          if (len) size = Number(len);
+        }
+      } catch { /* fall through; we'll check size after GET */ }
+
+      if (size > JIRA_MAX_FILE_BYTES) {
+        result.skipped.push({ fileName: c.fileName, reason: `file ${(size/1024/1024).toFixed(1)} MB exceeds per-file cap`, jobId: c.jobId });
+        continue;
+      }
+
+      // Step 2: download
+      try {
+        const dl = await fetch(c.downloadUrl, { headers: jenkinsHdrs, signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS) });
+        if (!dl.ok) {
+          result.skipped.push({ fileName: c.fileName, reason: `download failed: ${dl.status} ${dl.statusText}`, jobId: c.jobId });
+          continue;
+        }
+        bytes = await dl.arrayBuffer();
+      } catch (err: any) {
+        result.skipped.push({ fileName: c.fileName, reason: `download error: ${err?.message ?? err}`, jobId: c.jobId });
+        continue;
+      }
+    }
+
+    if (!bytes) {
+      result.skipped.push({ fileName: c.fileName, reason: "no bytes after fetch", jobId: c.jobId });
       continue;
     }
 
@@ -1126,7 +1231,8 @@ async function handleJiraUpload(req: IncomingMessage, res: ServerResponse, cfg: 
     // Step 3: upload to Jira via multipart form
     try {
       const form = new FormData();
-      form.append("file", new Blob([bytes]), c.fileName);
+      const blobType = c.relativePath.startsWith("__console__/") ? "text/plain;charset=utf-8" : "application/octet-stream";
+      form.append("file", new Blob([bytes], { type: blobType }), c.fileName);
       const up = await fetch(jiraAttachUrl, {
         method: "POST",
         headers: {
@@ -1283,6 +1389,39 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
   // accidental bulk uploads (e.g. impact-analyser's ~100k file dumps).
   if (path === "jira/upload-current-run" && req.method === "POST") {
     await handleJiraUpload(req, res, cfg);
+    return true;
+  }
+
+  // GET /_api/console-export/:jobId/:buildNumber?mode=full|sbom-tail
+  // Returns the console log as a downloadable text/plain attachment.
+  // Used by the synthetic console artifacts surfaced for e-orchestrator
+  // (full log) and e-nios-build (SBOM "STEP 1 … Finished" slice).
+  const consoleExportMatch = /^console-export\/([^/?]+)\/(\d+)(?:\?|$)/.exec(path);
+  if (consoleExportMatch) {
+    const [, jobId, buildStr] = consoleExportMatch;
+    const buildNumber = parseInt(buildStr, 10);
+    const job = cfg.jenkinsJobs.find((j) => j.id === jobId);
+    if (!job) {
+      res.statusCode = 404;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: "Job not found" }));
+      return true;
+    }
+    const modeParam = new URL(req.url ?? "", "http://localhost").searchParams.get("mode");
+    const mode: "full" | "sbom-tail" = modeParam === "sbom-tail" ? "sbom-tail" : "full";
+    const text = await getConsoleExportText(cfg, job, buildNumber, mode);
+    if (text == null) {
+      res.statusCode = 502;
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ error: "Console fetch failed" }));
+      return true;
+    }
+    const fileName = mode === "sbom-tail"
+      ? `${jobId}-#${buildNumber}-sbom-summary.txt`
+      : `${jobId}-#${buildNumber}-console.txt`;
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    res.end(text);
     return true;
   }
 
