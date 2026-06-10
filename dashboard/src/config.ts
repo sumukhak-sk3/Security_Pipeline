@@ -98,15 +98,15 @@ export const config = {
 
   impactAnalyser: {
     /** Backend API base URL (the FastAPI-style service the Jenkinsfile hits). */
-    apiUrl: env.VITE_IMPACT_API_URL ?? "http://10.120.23.89:8088",
+    apiUrl: env.VITE_IMPACT_API_URL || "http://10.120.23.89:8088",
     /** Frontend UI URL — also used as the default redirect button target. */
-    uiUrl: env.VITE_IMPACT_UI_URL ?? "http://10.120.23.89:5173",
+    uiUrl: env.VITE_IMPACT_UI_URL || "http://10.120.23.89:5173",
     defaultAuthorModel: env.VITE_IMPACT_AUTHOR_MODEL ?? "",
     defaultVerifierModel: env.VITE_IMPACT_VERIFIER_MODEL ?? "",
     /** URL for the "open analyser" redirect button on the Impact Analysis page. */
     redirectUrl:
-      env.VITE_IMPACT_REDIRECT_URL ??
-      env.VITE_IMPACT_UI_URL ??
+      env.VITE_IMPACT_REDIRECT_URL ||
+      env.VITE_IMPACT_UI_URL ||
       "http://10.120.23.89:5173",
     redirectLabel: env.VITE_IMPACT_REDIRECT_LABEL ?? "Open Impact Analyser",
   },

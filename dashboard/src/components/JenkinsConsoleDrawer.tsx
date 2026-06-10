@@ -60,7 +60,8 @@ export default function JenkinsConsoleDrawer({
         }
         setOffset(chunk.nextOffset);
         if (chunk.more || building) {
-          timer = setTimeout(() => tick(chunk.nextOffset), config.api.pollIntervalMs);
+          const interval = Math.max(250, config.api.pollIntervalMs || 0);
+          timer = setTimeout(() => tick(chunk.nextOffset), interval);
         }
       } catch (e) {
         if (!cancelled) setError((e as Error).message);

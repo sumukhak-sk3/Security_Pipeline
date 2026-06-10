@@ -10,7 +10,13 @@ import { config } from "../config";
 const base = () => config.impactAnalyser.apiUrl.replace(/\/+$/, "");
 
 async function getJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const url = `${base()}${path}`;
+  const b = base();
+  if (!b) {
+    throw new Error(
+      "Impact Analyser apiUrl is not configured (VITE_IMPACT_API_URL is empty).",
+    );
+  }
+  const url = `${b}${path}`;
   const res = await fetch(url, {
     headers: { Accept: "application/json" },
     ...init,
