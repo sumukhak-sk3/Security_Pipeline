@@ -34,16 +34,32 @@ export default defineConfig(({ mode }) => {
     env.UT_JENKINS_USER && env.UT_JENKINS_API_TOKEN
       ? `${env.UT_JENKINS_USER}:${env.UT_JENKINS_API_TOKEN}`
       : undefined;
-  const impactAuth =
-    env.IMPACT_JENKINS_USER && env.IMPACT_JENKINS_API_TOKEN
-      ? `${env.IMPACT_JENKINS_USER}:${env.IMPACT_JENKINS_API_TOKEN}`
-      : incaAuth;
-  const qa2Auth =
-    env.QA2_JENKINS_USER && env.QA2_JENKINS_API_TOKEN
-      ? `${env.QA2_JENKINS_USER}:${env.QA2_JENKINS_API_TOKEN}`
-      : incaAuth;
+  const hasImpactCreds = !!(env.IMPACT_JENKINS_USER && env.IMPACT_JENKINS_API_TOKEN);
+  const impactAuth = hasImpactCreds
+    ? `${env.IMPACT_JENKINS_USER}:${env.IMPACT_JENKINS_API_TOKEN}`
+    : incaAuth;
+  const hasQa2Creds = !!(env.QA2_JENKINS_USER && env.QA2_JENKINS_API_TOKEN);
+  const qa2Auth = hasQa2Creds
+    ? `${env.QA2_JENKINS_USER}:${env.QA2_JENKINS_API_TOKEN}`
+    : incaAuth;
   const rpToken = env.RP_BEARER_KEY ?? "";
   const dtrackToken = env.DTRACK_API_KEY ?? "";
+
+  // Disambiguate dedicated creds vs inherited fallback so a missing
+  // IMPACT_*/QA2_* token does not silently masquerade as configured.
+  const authState = (
+    hasDedicated: boolean,
+    resolved: string | undefined,
+  ): string => {
+    if (hasDedicated) return "set";
+    if (resolved) return "set(via-inca-fallback)";
+    return "MISSING";
+  };
+
+  // TLS verification on the Jenkins HTTPS proxies. Default is to verify;
+  // set JENKINS_PROXY_TLS_INSECURE=1 in .env.local only when the upstream
+  // uses a self-signed or otherwise untrusted cert.
+  const proxySecure = env.JENKINS_PROXY_TLS_INSECURE !== "1";
 
   // Boot log so missing tokens are obvious in the terminal.
   // eslint-disable-next-line no-console
@@ -51,10 +67,11 @@ export default defineConfig(({ mode }) => {
     "[vite proxy] jenkins auth \u2192",
     `inca=${incaAuth ? "set" : "MISSING"}`,
     `ut=${utAuth ? "set" : "MISSING"}`,
-    `impact=${impactAuth ? "set" : "MISSING"}`,
-    `qa2=${qa2Auth ? "set" : "MISSING"}`,
+    `impact=${authState(hasImpactCreds, impactAuth)}`,
+    `qa2=${authState(hasQa2Creds, qa2Auth)}`,
     `rp=${rpToken ? "set" : "MISSING"}`,
     `dtrack=${dtrackToken ? "set" : "MISSING"}`,
+    `tls=${proxySecure ? "verify" : "INSECURE"}`,
   );
 
   const stripBasicChallenge: ProxyOptions["configure"] = (proxy) => {
@@ -78,7 +95,7 @@ export default defineConfig(({ mode }) => {
         "/_jenkins/impact": {
           target: "https://jenkins.inca.infoblox.com",
           changeOrigin: true,
-          secure: false,
+          secure: proxySecure,
           auth: impactAuth,
           rewrite: (p) => p.replace(/^\/_jenkins\/impact/, ""),
           configure: stripBasicChallenge,
@@ -86,7 +103,7 @@ export default defineConfig(({ mode }) => {
         "/_jenkins/inca": {
           target: "https://jenkins.inca.infoblox.com",
           changeOrigin: true,
-          secure: false,
+          secure: proxySecure,
           auth: incaAuth,
           rewrite: (p) => p.replace(/^\/_jenkins\/inca/, ""),
           configure: stripBasicChallenge,

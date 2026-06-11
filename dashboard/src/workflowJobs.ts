@@ -2,7 +2,10 @@
  * Static mapping of internal job IDs → display title for each workflow.
  *
  * The Jenkins URL is resolved at render time via `jenkinsJobUrl(wf, id)`
- * (see src/config.ts), so swapping endpoints is a config-only change.
+ * (see src/config.ts). Note: pointing a job at a Jenkins instance on a new
+ * host also requires updating the proxy routes in `vite.config.ts` and the
+ * host → proxy mapping in `src/api/jenkinsClient.ts`; otherwise the browser
+ * will try to reach Jenkins directly and hit CORS/auth failures.
  *
  * `dependsOn` defines the pipeline ordering — a job won't start until its
  * upstream dependency finishes. Used by the UI to show "Waiting for …"
