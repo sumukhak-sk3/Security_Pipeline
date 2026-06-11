@@ -97,9 +97,20 @@ function CICDNode() {
   // Surface the last successful build on the overview — a single failed
   // latest run shouldn't dominate the card. We still show the failed/running
   // pill so the user knows the most recent attempt's state, but the build
-  // number always points at the last green build.
+  // `displayBuild` shows the most recent successful build number when one
+  // exists, falling back to the latest build attempt otherwise. The status
+  // pill always reflects the current/latest build so a failed or running
+  // build is not masked by historical successes.
   const displayBuild = lastSuccessfulBuild ?? lastBuild;
-  const displayStatus: typeof status = lastSuccessfulBuild ? "success" : status;
+  const displayStatus = status;
+  const buildLabel =
+    lastSuccessfulBuild != null && lastBuild === lastSuccessfulBuild
+      ? `Last successful build #${displayBuild}`
+      : lastSuccessfulBuild != null
+        ? `Last successful build #${lastSuccessfulBuild} (latest #${lastBuild})`
+        : lastBuild != null
+          ? `Last build #${lastBuild}`
+          : "No builds yet";
 
   const proxyBase = toProxyUrl("https://jenkins-qa2.inca.infoblox.com/job/IB_QA_CI_NIOS_CVE_Analyser");
   const today = new Date().toISOString().slice(0, 10);
@@ -155,7 +166,7 @@ function CICDNode() {
         </button>
       </div>
       <div className="mt-2 text-[11px] text-ink-subtle">
-        {displayBuild ? `Last successful build #${displayBuild}` : "No successful builds yet"}
+        {buildLabel}
       </div>
     </Link>
   );

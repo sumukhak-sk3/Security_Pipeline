@@ -119,7 +119,7 @@ export default defineConfig(({ mode }) => {
         "/_jenkins/qa2": {
           target: "https://jenkins-qa2.inca.infoblox.com",
           changeOrigin: true,
-          secure: false,
+          secure: proxySecure,
           auth: qa2Auth,
           rewrite: (p) => p.replace(/^\/_jenkins\/qa2/, ""),
           configure: stripBasicChallenge,

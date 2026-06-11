@@ -132,7 +132,7 @@ export default function History() {
     return entries.sort((a, b) => b.timestamp - a.timestamp);
   }, [jobs]);
 
-  // Group builds by date (same day = same run) — only show from 2026-06-08 onwards
+  // Group builds by date (same day = same run) — only show from 2026-06-05 onwards
   const runs = useMemo(() => {
     const groups = new Map<string, BuildEntry[]>();
     for (const build of allBuilds) {

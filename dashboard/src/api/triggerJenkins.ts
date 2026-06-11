@@ -13,7 +13,9 @@
 
 import { toProxyUrl } from "./jenkinsClient";
 
-const ORCHESTRATOR_URL = import.meta.env.VITE_JENKINS_ORCHESTRATOR_URL ?? "";
+// Standardize on the same env var used by the rest of the app
+// (src/config.ts → jenkinsJobUrl("E", "e-orchestrator")).
+const ORCHESTRATOR_URL = import.meta.env.VITE_JENKINS_JOB_E_ORCHESTRATOR ?? "";
 
 export interface TriggerResult {
   ok: boolean;
@@ -36,7 +38,7 @@ export async function triggerWorkflowE(opts?: {
   const branch = opts?.branch?.trim() ?? "";
 
   if (!ORCHESTRATOR_URL) {
-    return { ok: false, status: 0, error: "VITE_JENKINS_ORCHESTRATOR_URL not configured" };
+    return { ok: false, status: 0, error: "VITE_JENKINS_JOB_E_ORCHESTRATOR not configured" };
   }
 
   const proxyBase = toProxyUrl(ORCHESTRATOR_URL);

@@ -1,8 +1,14 @@
 import { useEffect, useState } from "react";
 import type { Status } from "../types";
 import { toProxyUrl } from "../api/jenkinsClient";
+import { config } from "../config";
 
 const CICD_JOB_URL = "https://jenkins-qa2.inca.infoblox.com/job/IB_QA_CI_NIOS_CVE_Analyser";
+
+// Floor of 60s prevents accidentally hammering Jenkins if the global
+// VITE_POLL_INTERVAL_MS is set to a very small value for other widgets.
+const MIN_POLL_MS = 60_000;
+const DEFAULT_POLL_MS = 120_000;
 
 interface CICDStatus {
   status: Status;
@@ -50,7 +56,11 @@ export function useCICDStatus(): CICDStatus {
     }
 
     poll();
-    const id = setInterval(poll, 120_000);
+    const intervalMs = Math.max(
+      MIN_POLL_MS,
+      config.api.pollIntervalMs || DEFAULT_POLL_MS,
+    );
+    const id = setInterval(poll, intervalMs);
     return () => {
       cancelled = true;
       clearInterval(id);
