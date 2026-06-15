@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, Navigate } from "react-router-dom";
 import { currentRun } from "../mock/data";
 import JobCard from "../components/JobCard";
@@ -19,6 +19,7 @@ import { useWorkflowLiveSummary } from "../hooks/useWorkflowLiveSummary";
 import { useSbomSummary } from "../hooks/useSbomSummary";
 import { useS3Cve } from "../hooks/useS3Cve";
 import { triggerWorkflowE } from "../api/triggerJenkins";
+import { awaitPrefetch } from "../api/prefetch";
 import { cn } from "../lib/cn";
 import { relTime } from "../lib/format";
 import type { Status } from "../types";
@@ -747,8 +748,32 @@ function TriggerPanel({ onBranchChange }: { onBranchChange?: (branch: string) =>
   const [branch, setBranch] = useState("");
   const [activeAction, setActiveAction] = useState<"none" | "test" | "trigger">("none");
   const [result, setResult] = useState<{ type: "success" | "error"; msg: string } | null>(null);
+  const [lastUsedBranch, setLastUsedBranch] = useState<string | null>(null);
 
-  const placeholder = `NIOSRFE-8575-${new Date().toISOString().slice(0, 10)}`;
+  // Fetch the last-used branch from the orchestrator's build params (OVERRIDE_BRANCH)
+  // or from CVE-BUILD's BUILD_PATH. This reflects what the script actually used last run.
+  useEffect(() => {
+    (async () => {
+      try {
+        const pre = await awaitPrefetch();
+        // Check orchestrator's OVERRIDE_BRANCH param first
+        const orch = pre?.jenkins?.jobs?.["e-orchestrator"];
+        if (orch?.buildParams?.OVERRIDE_BRANCH) {
+          setLastUsedBranch(orch.buildParams.OVERRIDE_BRANCH);
+          return;
+        }
+        // Fallback: derive from CVE-BUILD's BUILD_PATH (strip "origin/")
+        const build = pre?.jenkins?.jobs?.["e-nios-build"];
+        if (build?.buildParams?.BUILD_PATH) {
+          setLastUsedBranch(build.buildParams.BUILD_PATH.replace(/^origin\//, ""));
+          return;
+        }
+      } catch { /* use static fallback */ }
+    })();
+  }, []);
+
+  // Dynamic placeholder: last-used branch from Jenkins, or static fallback
+  const placeholder = lastUsedBranch || "bugfix/NIOSRFE-8575";
   const busy = activeAction !== "none";
 
   const handleBranchChange = (value: string) => {
@@ -799,7 +824,7 @@ function TriggerPanel({ onBranchChange }: { onBranchChange?: (branch: string) =>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
         <div className="flex-1">
           <label htmlFor="branch-input" className="mb-1 block text-xs font-medium text-ink-subtle">
-            Branch name <span className="text-ink-muted">(optional — leave empty for auto-generated)</span>
+            Branch name <span className="text-ink-muted">(auto-prefixed with <code className="rounded bg-surface-2 px-0.5">bugfix/</code> if not already)</span>
           </label>
           <input
             id="branch-input"
@@ -876,7 +901,10 @@ function TriggerPanel({ onBranchChange }: { onBranchChange?: (branch: string) =>
       )}
 
       <div className="mt-3 text-[11px] text-ink-subtle">
-        Default: <code className="rounded bg-surface-2 px-1 py-0.5">{placeholder}</code> · 
+        {lastUsedBranch
+          ? <>Last used: <code className="rounded bg-surface-2 px-1 py-0.5">{lastUsedBranch}</code> · </>
+          : <>Default: <code className="rounded bg-surface-2 px-1 py-0.5">{placeholder}</code> · </>
+        }
         Orchestrator: <code className="rounded bg-surface-2 px-1 py-0.5">NIOS-CVE-Repo</code>
       </div>
     </section>

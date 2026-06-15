@@ -67,8 +67,10 @@ export async function triggerWorkflowE(opts?: {
 
     let endpoint: string;
     if (branch) {
+      // Always ensure branch is under bugfix/ folder
+      const fullBranch = branch.startsWith("bugfix/") ? branch : `bugfix/${branch}`;
       // Use /buildWithParameters when we have params, passed as query string
-      queryParams.set("OVERRIDE_BRANCH", branch);
+      queryParams.set("OVERRIDE_BRANCH", fullBranch);
       endpoint = `${proxyBase}/buildWithParameters?${queryParams.toString()}`;
     } else {
       // No params — use /build

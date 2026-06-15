@@ -1,4 +1,4 @@
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import type { Workflow } from "../types";
 import ProgressBar from "./ProgressBar";
 import StatusPill from "./StatusPill";
@@ -7,6 +7,7 @@ import { Link } from "react-router-dom";
 import { workflowShortName } from "../workflows";
 import { useCICDStatus } from "../hooks/useCICDStatus";
 import { toProxyUrl } from "../api/jenkinsClient";
+import { awaitPrefetch } from "../api/prefetch";
 
 export default function WorkflowFlow({ workflows }: { workflows: Workflow[] }) {
   return (
@@ -113,8 +114,20 @@ function CICDNode() {
           : "No builds yet";
 
   const proxyBase = toProxyUrl("https://jenkins-qa2.inca.infoblox.com/job/IB_QA_CI_NIOS_CVE_Analyser");
-  const today = new Date().toISOString().slice(0, 10);
-  const defaultBranch = `NIOSRFE-8575-${today}`;
+  const [cicdBranch, setCicdBranch] = useState<string>("bugfix/NIOSRFE-8575");
+
+  // Read actual branch from CVE-BUILD's BUILD_PATH param (reflects what the script last used)
+  useEffect(() => {
+    (async () => {
+      try {
+        const pre = await awaitPrefetch();
+        const build = pre?.jenkins?.jobs?.["e-nios-build"];
+        if (build?.buildParams?.BUILD_PATH) {
+          setCicdBranch(build.buildParams.BUILD_PATH.replace(/^origin\//, ""));
+        }
+      } catch { /* keep fallback */ }
+    })();
+  }, []);
 
   async function handleQuickTrigger(e: React.MouseEvent) {
     e.preventDefault();
@@ -122,7 +135,7 @@ function CICDNode() {
     setTriggering(true);
     try {
       const params = new URLSearchParams();
-      params.set("BRANCH", defaultBranch);
+      params.set("BRANCH", cicdBranch);
       await fetch(`${proxyBase}/buildWithParameters`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
