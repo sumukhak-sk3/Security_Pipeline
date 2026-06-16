@@ -1,9 +1,5 @@
 import { useEffect, useState } from "react";
-import { fetchCachedRP, fetchCachedRPForBranch, fetchPipelineSlowUT, type CachedRPLaunch, type PipelineSlowLaunch } from "../api/cachedClient";
-import { awaitPrefetch } from "../api/prefetch";
-
-// ─── Baseline branch (develop/9.2 → develop_9.2 in RP) ─────────────────────
-const BASELINE_BRANCH = "develop_9.2";
+import { fetchPipelineQuickUT, fetchPipelineSlowUT, type CachedRPLaunch, type PipelineSlowLaunch } from "../api/cachedClient";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -149,20 +145,18 @@ export default function Metrics() {
 
     async function load() {
       try {
-        // Fetch current branch RP data
-        const pre = await awaitPrefetch();
-        const currentRP = pre?.rp ?? await fetchCachedRP();
-
-        // Fetch baseline for quick_ut (develop/9.2)
-        const baselineRP = await fetchCachedRPForBranch(BASELINE_BRANCH);
+        // Fetch the 2 most recent pipeline-triggered Quick UT builds
+        const [latestQuick, prevQuick] = await fetchPipelineQuickUT();
 
         // Fetch the 2 most recent pipeline-triggered Slow UT builds
         const [latestSlow, prevSlow] = await fetchPipelineSlowUT();
-        const currentBranch = currentRP.branchTag || "bugfix_ubuntu-mirror";
+
+        const currentBranch = (latestQuick as PipelineSlowLaunch | null)?.branch ?? 
+                              (latestSlow as PipelineSlowLaunch | null)?.branch ?? "";
 
         if (cancelled) return;
         setData({
-          quick: { current: currentRP.quick, baseline: baselineRP.quick },
+          quick: { current: latestQuick, baseline: prevQuick },
           slow: { current: latestSlow, baseline: prevSlow },
           currentBranch,
           loading: false,
@@ -203,22 +197,26 @@ export default function Metrics() {
         <div className="text-[11px] font-semibold uppercase tracking-wider text-ink-subtle">
           Metrics
         </div>
-        <h1 className="mt-1 text-2xl font-semibold tracking-tight">UT — Baseline Comparison</h1>
+        <h1 className="mt-1 text-2xl font-semibold tracking-tight">UT — Pipeline Comparison</h1>
         <p className="mt-1 text-xs text-ink-subtle">
-          Comparing <span className="font-medium text-ink">{currentBranch.replace(/_/g, "/")}</span> against baseline{" "}
-          <span className="font-medium text-ink">develop/9.2</span>
+          Comparing the 2 most recent pipeline-triggered builds for each UT type
         </p>
       </div>
 
-      {/* Quick UT — compared against develop/9.2 */}
-      <UTSection title="Quick UT" current={quick.current} baseline={quick.baseline} baselineLabel="Baseline (develop/9.2)" />
-
-      {/* Slow UT — compare last 2 pipeline-triggered builds */}
+      {/* Quick UT — last 2 pipeline-triggered builds */}
       <UTSection
-        title={`Slow UT — ${(slow.current as PipelineSlowLaunch | null)?.branch?.replace(/_/g, "/") ?? "Latest"}`}
+        title={`Quick UT — ${(quick.current as PipelineSlowLaunch | null)?.branch ?? "Latest"}`}
+        current={quick.current}
+        baseline={quick.baseline}
+        baselineLabel={`Previous (${(quick.baseline as PipelineSlowLaunch | null)?.branch ?? "—"})`}
+      />
+
+      {/* Slow UT — last 2 pipeline-triggered builds */}
+      <UTSection
+        title={`Slow UT — ${(slow.current as PipelineSlowLaunch | null)?.branch ?? "Latest"}`}
         current={slow.current}
         baseline={slow.baseline}
-        baselineLabel={`Previous (${(slow.baseline as PipelineSlowLaunch | null)?.branch?.replace(/_/g, "/") ?? "—"})`}
+        baselineLabel={`Previous (${(slow.baseline as PipelineSlowLaunch | null)?.branch ?? "—"})`}
       />
     </div>
   );

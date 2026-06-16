@@ -1412,6 +1412,93 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
     return true;
   }
 
+  // GET /_api/rp/pipeline-quick — compare 2 most recent successful Quick UT runs triggered by the pipeline
+  if (path.startsWith("rp/pipeline-quick")) {
+    const cacheKey = "rp:pipeline-quick";
+    const cached = cacheGet(cacheKey);
+    if (cached) {
+      res.end(JSON.stringify({ ok: true, ...cached, fromCache: true }));
+      return true;
+    }
+
+    const headers: Record<string, string> = {};
+    if (cfg.rpToken) headers.Authorization = `Bearer ${cfg.rpToken}`;
+
+    // Get cached Quick UT Jenkins job builds
+    const quickJobCache = cacheGet<JenkinsJobCache>("jenkins:e-quick-ut");
+    const quickBuilds = (quickJobCache?.builds ?? [])
+      .filter((b: any) => b.result === "SUCCESS")
+      .sort((a: any, b: any) => b.timestamp - a.timestamp)
+      .slice(0, 2);
+
+    if (quickBuilds.length === 0) {
+      res.end(JSON.stringify({ ok: true, launches: [], message: "No successful Quick UT builds found" }));
+      return true;
+    }
+
+    const quickJobUrl = cfg.jenkinsJobs.find((j) => j.id === "e-quick-ut")?.url ?? "";
+    const jenkinsProxy = cfg.jenkinsJobs.find((j) => j.id === "e-quick-ut")?.proxy ?? "ut";
+    const jenkinsAuth = jenkinsHeaders(cfg, jenkinsProxy);
+
+    Promise.all(
+      quickBuilds.map(async (build: any) => {
+        try {
+          const paramData = await serverFetch(
+            `${quickJobUrl}/${build.number}/api/json?tree=${encodeURIComponent("actions[parameters[name,value]]")}`,
+            jenkinsAuth,
+          );
+          let branch = "";
+          for (const action of paramData?.actions ?? []) {
+            if (action?.parameters) {
+              for (const p of action.parameters) {
+                if (p?.name === "BUILD") branch = p.value ?? "";
+              }
+            }
+          }
+          return { buildNumber: build.number, branch, timestamp: build.timestamp };
+        } catch {
+          return { buildNumber: build.number, branch: "", timestamp: build.timestamp };
+        }
+      }),
+    ).then(async (buildInfos) => {
+      const launches: (RPLaunchCache & { branch: string; buildNumber: number })[] = [];
+
+      for (const info of buildInfos) {
+        if (!info.branch) continue;
+        const tag = info.branch.replace(/\//g, "_");
+        const launchesUrl = `${cfg.rpBaseUrl}/api/v1/${cfg.rpProject}/launch?page.size=5&page.page=1&page.sort=startTime,DESC&filter.cnt.name=${encodeURIComponent(tag + "_quick")}`;
+        try {
+          const data = await serverFetch(launchesUrl, headers);
+          const launch = (data.content ?? []).find((l: any) => l.name?.endsWith("_quick"));
+          if (!launch) continue;
+          const summary = await serverFetch(`${cfg.rpBaseUrl}/api/v1/${cfg.rpProject}/launch/${launch.id}`, headers);
+          const exec = summary.statistics?.executions ?? {};
+          launches.push({
+            id: summary.id,
+            name: summary.name,
+            status: summary.status ?? "unknown",
+            total: exec.total ?? 0,
+            passed: exec.passed ?? 0,
+            failed: exec.failed ?? 0,
+            skipped: exec.skipped ?? 0,
+            startTime: summary.startTime,
+            endTime: summary.endTime,
+            url: `${cfg.rpBaseUrl}/ui/#/${cfg.rpProject}/launches/all/${summary.id}`,
+            branch: info.branch,
+            buildNumber: info.buildNumber,
+          });
+        } catch { /* skip this one */ }
+      }
+
+      const result = { launches };
+      cacheSet(cacheKey, result, cfg.rpCacheTtlMs);
+      res.end(JSON.stringify({ ok: true, ...result }));
+    }).catch((err) => {
+      res.end(JSON.stringify({ ok: false, error: err.message }));
+    });
+    return true;
+  }
+
   // GET /_api/rp/previous?branch=...&type=slow|quick — fetch the second-most-recent launch for a type
   if (path.startsWith("rp/previous")) {
     const urlObj = new URL(url, "http://localhost");

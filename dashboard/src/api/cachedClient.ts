@@ -124,6 +124,18 @@ export async function fetchPipelineSlowUT(): Promise<[PipelineSlowLaunch | null,
 }
 
 /**
+ * Fetch the 2 most recent Quick UT RP launches for builds triggered by our pipeline.
+ * Returns [latest, previous] based on actual Jenkins Quick UT successful builds.
+ */
+export async function fetchPipelineQuickUT(): Promise<[PipelineSlowLaunch | null, PipelineSlowLaunch | null]> {
+  const res = await fetch("/_api/rp/pipeline-quick", { signal: AbortSignal.timeout(10000) });
+  if (!res.ok) throw new Error(`Backend ${res.status}`);
+  const data = await res.json();
+  const launches: PipelineSlowLaunch[] = data.launches ?? [];
+  return [launches[0] ?? null, launches[1] ?? null];
+}
+
+/**
  * Convert a CachedJenkinsJob to the JenkinsJob type used by the frontend.
  */
 export function toJenkinsJob(cached: CachedJenkinsJob): JenkinsJob {
