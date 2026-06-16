@@ -741,7 +741,7 @@ async function pollRPLaunches(cfg: PluginConfig, branchTag: string): Promise<{ q
         skipped: exec.skipped ?? 0,
         startTime: summary.startTime,
         endTime: summary.endTime,
-        url: `${cfg.rpBaseUrl}/ui/#${cfg.rpProject}/launches/all/${summary.id}`,
+        url: `${cfg.rpBaseUrl}/ui/#/${cfg.rpProject}/launches/all/${summary.id}`,
       };
 
       // Fetch failed items (parallel)
@@ -1364,7 +1364,7 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
         skipped: exec.skipped ?? 0,
         startTime: summary.startTime,
         endTime: summary.endTime,
-        url: `${cfg.rpBaseUrl}/ui/#${cfg.rpProject}/launches/all/${summary.id}`,
+        url: `${cfg.rpBaseUrl}/ui/#/${cfg.rpProject}/launches/all/${summary.id}`,
       };
       cacheSet(cacheKey, entry, cfg.rpCacheTtlMs);
       res.end(JSON.stringify({ ok: true, branchTag: tag, launch: entry }));
