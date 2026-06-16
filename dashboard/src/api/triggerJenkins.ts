@@ -58,9 +58,11 @@ export async function triggerWorkflowE(opts?: {
     }
   }
 
-  // Real trigger: POST to /build with branch param as query string
-  // Note: /build with query params works with API token auth without needing a CSRF crumb.
-  // /buildWithParameters requires a session-bound crumb which is tricky through a proxy.
+  // Real trigger: POST to Jenkins.
+  // If a branch is provided, use /buildWithParameters so Jenkins injects OVERRIDE_BRANCH
+  // as an environment variable into the shell build step. This requires the job to be
+  // configured as a "Parameterized Build" with a String Parameter named OVERRIDE_BRANCH.
+  // API-token auth (Basic Auth header) does NOT require a CSRF crumb in Jenkins 2.96+.
   try {
     const queryParams = new URLSearchParams();
     queryParams.set("delay", "0sec");
@@ -69,11 +71,10 @@ export async function triggerWorkflowE(opts?: {
     if (branch) {
       // Always ensure branch is under bugfix/ folder
       const fullBranch = branch.startsWith("bugfix/") ? branch : `bugfix/${branch}`;
-      // Use /buildWithParameters when we have params, passed as query string
       queryParams.set("OVERRIDE_BRANCH", fullBranch);
       endpoint = `${proxyBase}/buildWithParameters?${queryParams.toString()}`;
     } else {
-      // No params — use /build
+      // No branch override — trigger with defaults
       endpoint = `${proxyBase}/build?${queryParams.toString()}`;
     }
 
