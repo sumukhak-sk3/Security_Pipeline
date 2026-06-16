@@ -106,6 +106,23 @@ export async function fetchCachedRPPrevious(branch: string, type: "quick" | "slo
   return data.launch ?? null;
 }
 
+export interface PipelineSlowLaunch extends CachedRPLaunch {
+  branch: string;
+  buildNumber: number;
+}
+
+/**
+ * Fetch the 2 most recent Slow UT RP launches for builds triggered by our pipeline.
+ * Returns [latest, previous] based on actual Jenkins Slow UT successful builds.
+ */
+export async function fetchPipelineSlowUT(): Promise<[PipelineSlowLaunch | null, PipelineSlowLaunch | null]> {
+  const res = await fetch("/_api/rp/pipeline-slow", { signal: AbortSignal.timeout(10000) });
+  if (!res.ok) throw new Error(`Backend ${res.status}`);
+  const data = await res.json();
+  const launches: PipelineSlowLaunch[] = data.launches ?? [];
+  return [launches[0] ?? null, launches[1] ?? null];
+}
+
 /**
  * Convert a CachedJenkinsJob to the JenkinsJob type used by the frontend.
  */

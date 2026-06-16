@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fetchCachedRP, fetchCachedRPForBranch, fetchCachedRPPrevious, type CachedRPLaunch } from "../api/cachedClient";
+import { fetchCachedRP, fetchCachedRPForBranch, fetchPipelineSlowUT, type CachedRPLaunch, type PipelineSlowLaunch } from "../api/cachedClient";
 import { awaitPrefetch } from "../api/prefetch";
 
 // ─── Baseline branch (develop/9.2 → develop_9.2 in RP) ─────────────────────
@@ -156,14 +156,14 @@ export default function Metrics() {
         // Fetch baseline for quick_ut (develop/9.2)
         const baselineRP = await fetchCachedRPForBranch(BASELINE_BRANCH);
 
-        // Fetch previous slow_ut run on the same branch
+        // Fetch the 2 most recent pipeline-triggered Slow UT builds
+        const [latestSlow, prevSlow] = await fetchPipelineSlowUT();
         const currentBranch = currentRP.branchTag || "bugfix_ubuntu-mirror";
-        const prevSlow = await fetchCachedRPPrevious(currentBranch, "slow");
 
         if (cancelled) return;
         setData({
           quick: { current: currentRP.quick, baseline: baselineRP.quick },
-          slow: { current: currentRP.slow, baseline: prevSlow },
+          slow: { current: latestSlow, baseline: prevSlow },
           currentBranch,
           loading: false,
           error: null,
@@ -213,8 +213,13 @@ export default function Metrics() {
       {/* Quick UT — compared against develop/9.2 */}
       <UTSection title="Quick UT" current={quick.current} baseline={quick.baseline} baselineLabel="Baseline (develop/9.2)" />
 
-      {/* Slow UT — compared against previous run on same branch */}
-      <UTSection title="Slow UT" current={slow.current} baseline={slow.baseline} baselineLabel="Previous Run" />
+      {/* Slow UT — compare last 2 pipeline-triggered builds */}
+      <UTSection
+        title={`Slow UT — ${(slow.current as PipelineSlowLaunch | null)?.branch?.replace(/_/g, "/") ?? "Latest"}`}
+        current={slow.current}
+        baseline={slow.baseline}
+        baselineLabel={`Previous (${(slow.baseline as PipelineSlowLaunch | null)?.branch?.replace(/_/g, "/") ?? "—"})`}
+      />
     </div>
   );
 }
