@@ -95,6 +95,18 @@ export async function fetchCachedRPForBranch(branch: string): Promise<CachedRPRe
 }
 
 /**
+ * Fetch the previous (second-most-recent) RP launch for a given branch and UT type.
+ */
+export async function fetchCachedRPPrevious(branch: string, type: "quick" | "slow"): Promise<CachedRPLaunch | null> {
+  const res = await fetch(`/_api/rp/previous?branch=${encodeURIComponent(branch)}&type=${type}`, {
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) throw new Error(`Backend ${res.status}`);
+  const data = await res.json();
+  return data.launch ?? null;
+}
+
+/**
  * Convert a CachedJenkinsJob to the JenkinsJob type used by the frontend.
  */
 export function toJenkinsJob(cached: CachedJenkinsJob): JenkinsJob {

@@ -1323,6 +1323,57 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
     return true;
   }
 
+  // GET /_api/rp/previous?branch=...&type=slow|quick — fetch the second-most-recent launch for a type
+  if (path.startsWith("rp/previous")) {
+    const urlObj = new URL(url, "http://localhost");
+    const branch = urlObj.searchParams.get("branch") ?? "";
+    const utType = urlObj.searchParams.get("type") as "quick" | "slow" | null;
+    if (!branch || !utType) {
+      res.end(JSON.stringify({ ok: false, error: "branch and type params required" }));
+      return true;
+    }
+    const tag = branch.replace(/\//g, "_");
+    const cacheKey = `rp:previous:${tag}:${utType}`;
+    const cached = cacheGet(cacheKey);
+    if (cached) {
+      res.end(JSON.stringify({ ok: true, branchTag: tag, launch: cached, fromCache: true }));
+      return true;
+    }
+
+    const headers: Record<string, string> = {};
+    if (cfg.rpToken) headers.Authorization = `Bearer ${cfg.rpToken}`;
+    const launchesUrl = `${cfg.rpBaseUrl}/api/v1/${cfg.rpProject}/launch?page.size=20&page.page=1&page.sort=startTime,DESC&filter.cnt.name=${encodeURIComponent(tag)}`;
+
+    serverFetch(launchesUrl, headers).then(async (data) => {
+      const launches: any[] = data.content ?? [];
+      const matches = launches.filter((l: any) => l.name?.endsWith(`_${utType}`));
+      const prev = matches[1]; // second match = previous run
+      if (!prev) {
+        res.end(JSON.stringify({ ok: true, branchTag: tag, launch: null }));
+        return;
+      }
+      const summary = await serverFetch(`${cfg.rpBaseUrl}/api/v1/${cfg.rpProject}/launch/${prev.id}`, headers);
+      const exec = summary.statistics?.executions ?? {};
+      const entry: RPLaunchCache = {
+        id: summary.id,
+        name: summary.name,
+        status: summary.status ?? "unknown",
+        total: exec.total ?? 0,
+        passed: exec.passed ?? 0,
+        failed: exec.failed ?? 0,
+        skipped: exec.skipped ?? 0,
+        startTime: summary.startTime,
+        endTime: summary.endTime,
+        url: `${cfg.rpBaseUrl}/ui/#${cfg.rpProject}/launches/all/${summary.id}`,
+      };
+      cacheSet(cacheKey, entry, cfg.rpCacheTtlMs);
+      res.end(JSON.stringify({ ok: true, branchTag: tag, launch: entry }));
+    }).catch((err) => {
+      res.end(JSON.stringify({ ok: false, error: err.message }));
+    });
+    return true;
+  }
+
   // GET /_api/status — health check
   if (path === "status") {
     res.end(JSON.stringify({
