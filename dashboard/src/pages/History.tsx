@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { awaitPrefetch } from "../api/prefetch";
 import { fetchCachedJenkins, type CachedJenkinsJob } from "../api/cachedClient";
+import { fetchRuns, raisePR, type RunInfo } from "../api/impactClient";
 import StatusPill from "../components/StatusPill";
 import { formatDuration } from "../lib/format";
 import type { Status } from "../types";
@@ -38,6 +39,10 @@ interface RunGroup {
   duration: number;
   /** Status per canonical job */
   jobStatuses: Record<string, Status>;
+  /** Matched run id from Impact backend, if found */
+  backendRunId?: string;
+  /** Backend run state (e.g. ok/error/running), if found */
+  backendState?: string;
 }
 
 /* ─── Helpers ────────────────────────────────────────────────────────────── */
@@ -74,6 +79,41 @@ function displayJobName(name: string): string {
   return JOB_DISPLAY_NAMES[name] ?? name;
 }
 
+function normalizeBackendState(status: RunInfo["status"]): string {
+  if (!status) return "";
+  if (typeof status === "string") return status;
+  return status.state ?? "";
+}
+
+function readBackendState(r: RunInfo): string {
+  const fromStatus = normalizeBackendState(r.status);
+  if (fromStatus) return fromStatus;
+  return String(r.state ?? "");
+}
+
+function runStartMs(r: RunInfo): number {
+  const raw = r.started_at;
+  if (typeof raw === "number") {
+    // Backend may return seconds since epoch.
+    return raw > 1e12 ? raw : raw * 1000;
+  }
+  if (typeof raw === "string") {
+    const n = Number(raw);
+    if (Number.isFinite(n)) return n > 1e12 ? n : n * 1000;
+    const parsed = Date.parse(raw);
+    return Number.isFinite(parsed) ? parsed : NaN;
+  }
+  return NaN;
+}
+
+function runInfoId(r: RunInfo): string {
+  return String(r.run_id ?? r.id ?? "");
+}
+
+function runInfoBranch(r: RunInfo): string {
+  return String(r.request?.branch ?? r.branch ?? "");
+}
+
 const statusFilters: (Status | "all")[] = ["all", "running", "success", "failed", "pending"];
 
 /* ─── Component ──────────────────────────────────────────────────────────── */
@@ -81,8 +121,12 @@ const statusFilters: (Status | "all")[] = ["all", "running", "success", "failed"
 export default function History() {
   const [status, setStatus] = useState<Status | "all">("all");
   const [jobs, setJobs] = useState<Record<string, CachedJenkinsJob | null>>({});
+  const [impactRuns, setImpactRuns] = useState<RunInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedRun, setExpandedRun] = useState<string | null>(null);
+  const [prStateByRun, setPrStateByRun] = useState<Record<string, "idle" | "pending" | "success" | "failed">>({});
+  const [prErrorByRun, setPrErrorByRun] = useState<Record<string, string>>({});
+  const [prUrlByRun, setPrUrlByRun] = useState<Record<string, string>>({});
 
   // Load real build data from backend cache
   useEffect(() => {
@@ -107,6 +151,21 @@ export default function History() {
       if (!cancelled) setLoading(false);
     })();
     return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await fetchRuns();
+        if (!cancelled) setImpactRuns(data);
+      } catch {
+        if (!cancelled) setImpactRuns([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Flatten all builds from all jobs into BuildEntry[]
@@ -181,6 +240,28 @@ export default function History() {
       // CICD: no build data in history yet, show pending
       jobStatuses["cicd"] = "pending";
 
+      const candidateImpactRuns = impactRuns
+        .filter((r) => {
+          const ms = runStartMs(r);
+          return Number.isFinite(ms);
+        })
+        .map((r) => ({
+          id: runInfoId(r),
+          state: readBackendState(r),
+          startedAtMs: runStartMs(r),
+          branch: runInfoBranch(r),
+        }))
+        .filter((r) => r.id);
+
+      // Pick nearest started_at overall; if branch is known, prefer branch match.
+      const matched = candidateImpactRuns
+        .sort((a, b) => {
+          const aBranchMatch = branch !== "unknown" && a.branch === branch ? 1 : 0;
+          const bBranchMatch = branch !== "unknown" && b.branch === branch ? 1 : 0;
+          if (aBranchMatch !== bBranchMatch) return bBranchMatch - aBranchMatch;
+          return Math.abs(a.startedAtMs - earliest) - Math.abs(b.startedAtMs - earliest);
+        })[0];
+
       result.push({
         key,
         branch,
@@ -190,16 +271,59 @@ export default function History() {
         status: groupStatus(builds),
         duration: latest - earliest,
         jobStatuses,
+        backendRunId: matched?.id,
+        backendState: matched?.state,
       });
     }
     return result.sort((a, b) => b.startedAt - a.startedAt);
-  }, [allBuilds]);
+  }, [allBuilds, impactRuns]);
 
   // Filter by status
   const filteredRuns = useMemo(() => {
     if (status === "all") return runs;
     return runs.filter((r) => r.status === status);
   }, [runs, status]);
+
+  async function handleRaisePR(run: RunGroup) {
+    const fallbackRunId = impactRuns
+      .map((r) => ({ id: runInfoId(r), state: readBackendState(r), startedAtMs: runStartMs(r) }))
+      .filter((r) => r.id && (r.state === "ok" || r.state === "completed"))
+      .sort((a, b) => b.startedAtMs - a.startedAtMs)[0]?.id;
+
+    const targetRunId = run.backendRunId || fallbackRunId;
+    if (!targetRunId) {
+      setPrStateByRun((prev) => ({ ...prev, [run.key]: "failed" }));
+      setPrErrorByRun((prev) => ({
+        ...prev,
+        [run.key]: "No completed backend run is available to raise a PR.",
+      }));
+      return;
+    }
+
+    setPrStateByRun((prev) => ({ ...prev, [run.key]: "pending" }));
+    setPrErrorByRun((prev) => ({ ...prev, [run.key]: "" }));
+    setPrUrlByRun((prev) => ({ ...prev, [run.key]: "" }));
+
+    try {
+      const res = await raisePR(targetRunId);
+      if (res.success && res.pr_url) {
+        setPrStateByRun((prev) => ({ ...prev, [run.key]: "success" }));
+        setPrUrlByRun((prev) => ({ ...prev, [run.key]: res.pr_url ?? "" }));
+        return;
+      }
+      setPrStateByRun((prev) => ({ ...prev, [run.key]: "failed" }));
+      setPrErrorByRun((prev) => ({
+        ...prev,
+        [run.key]: res.message || "Failed to create PR",
+      }));
+    } catch (error) {
+      setPrStateByRun((prev) => ({ ...prev, [run.key]: "failed" }));
+      setPrErrorByRun((prev) => ({
+        ...prev,
+        [run.key]: String(error),
+      }));
+    }
+  }
 
   return (
     <div className="space-y-5">
@@ -250,6 +374,8 @@ export default function History() {
           <div className="space-y-2">
             {filteredRuns.map((run) => {
               const isOpen = expandedRun === run.key;
+              const prState = prStateByRun[run.key] ?? "idle";
+              const canRaisePR = run.status === "success";
               const dateLabel = new Date(run.startedAt).toLocaleDateString(undefined, {
                 weekday: "short",
                 day: "numeric",
@@ -305,15 +431,64 @@ export default function History() {
                     </div>
 
                     {/* Chevron */}
-                    <span
-                      className={
-                        "shrink-0 text-ink-subtle transition-transform " +
-                        (isOpen ? "rotate-90" : "")
-                      }
-                    >
-                      ▸
-                    </span>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={!canRaisePR || prState === "pending" || prState === "success"}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void handleRaisePR(run);
+                        }}
+                        className={
+                          "rounded border px-2.5 py-1 text-[11px] font-medium transition " +
+                          (!canRaisePR || prState === "pending" || prState === "success"
+                            ? "cursor-not-allowed border-line text-ink-subtle"
+                            : "border-accent text-accent hover:bg-accent/10")
+                        }
+                        title={
+                          run.status !== "success"
+                              ? "Available once Jenkins run is successful"
+                              : prState === "pending"
+                                ? "Creating PR..."
+                                : prState === "success"
+                                  ? "PR created"
+                                  : "Raise PR"
+                        }
+                      >
+                        {prState === "pending"
+                          ? "Creating PR..."
+                          : prState === "success"
+                            ? "PR created"
+                            : "Raise PR"}
+                      </button>
+                      <span
+                        className={
+                          "text-ink-subtle transition-transform " +
+                          (isOpen ? "rotate-90" : "")
+                        }
+                      >
+                        ▸
+                      </span>
+                    </div>
                   </button>
+
+                  {(prErrorByRun[run.key] || prUrlByRun[run.key]) && (
+                    <div className="border-t border-line/40 px-6 py-2 text-xs">
+                      {prErrorByRun[run.key] && (
+                        <div className="text-status-failed">{prErrorByRun[run.key]}</div>
+                      )}
+                      {prUrlByRun[run.key] && (
+                        <a
+                          href={prUrlByRun[run.key]}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-accent hover:underline"
+                        >
+                          View PR on GitHub ↗
+                        </a>
+                      )}
+                    </div>
+                  )}
 
                   {/* Expanded details */}
                   {isOpen && (

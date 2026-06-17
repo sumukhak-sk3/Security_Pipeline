@@ -117,7 +117,7 @@ export default defineConfig(({ mode }) => {
           configure: stripBasicChallenge,
         },
         "/_jenkins/qa2": {
-          target: "https://jenkins-qa2.inca.infoblox.com",
+          target: env.QA2_JENKINS_BASE_URL || "https://jenkins-qa2.inca.infoblox.com",
           changeOrigin: true,
           secure: proxySecure,
           auth: qa2Auth,

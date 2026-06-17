@@ -42,9 +42,15 @@ export interface IndexInfo {
 export interface RunInfo {
   run_id?: string;
   id?: string;
-  status?: string;
-  started_at?: string;
+  status?: string | { state?: string };
+  state?: string;
+  started_at?: string | number;
   finished_at?: string;
+  branch?: string;
+  request?: {
+    branch?: string;
+    [k: string]: unknown;
+  };
   report_url?: string;
   [k: string]: unknown;
 }
@@ -65,6 +71,16 @@ export function fetchLatestRun(): Promise<RunInfo> {
   return getJson<RunInfo>("/runs/latest");
 }
 
+export async function fetchRuns(): Promise<RunInfo[]> {
+  const data = await getJson<
+    RunInfo[] | { runs?: RunInfo[]; items?: RunInfo[] }
+  >("/runs");
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.runs)) return data.runs;
+  if (Array.isArray(data?.items)) return data.items;
+  return [];
+}
+
 export interface CveItem {
   cve_id?: string;
   id?: string;
@@ -81,6 +97,52 @@ export async function fetchRunCves(runId: string): Promise<CveItem[]> {
   if (Array.isArray(data?.cves)) return data.cves;
   if (Array.isArray(data?.items)) return data.items;
   return [];
+}
+
+export interface RaisePRResponse {
+  success: boolean;
+  pr_number?: number;
+  pr_url?: string;
+  branch_name?: string;
+  message: string;
+}
+
+export interface BackendRun {
+  run_id?: string;
+  id?: string;
+  status?: { state?: string } | string;
+  branch?: string;
+  started_at?: string;
+  finished_at?: string;
+  [k: string]: unknown;
+}
+
+async function postJson<T>(path: string, body?: unknown, init?: RequestInit): Promise<T> {
+  const b = base();
+  if (!b) {
+    throw new Error(
+      "Impact Analyser apiUrl is not configured (VITE_IMPACT_API_URL is empty).",
+    );
+  }
+  const url = `${b}${path}`;
+  const res = await fetch(url, {
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    method: "POST",
+    body: body ? JSON.stringify(body) : undefined,
+    ...init,
+  });
+  if (!res.ok) {
+    throw new Error(`${res.status} ${res.statusText} — ${url}`);
+  }
+  return (await res.json()) as T;
+}
+
+export function getRun(runId: string): Promise<BackendRun> {
+  return getJson<BackendRun>(`/runs/${encodeURIComponent(runId)}`);
+}
+
+export function raisePR(runId: string): Promise<RaisePRResponse> {
+  return postJson<RaisePRResponse>(`/runs/${encodeURIComponent(runId)}/raise-pr`, {});
 }
 
 /** Probe a path and return its raw JSON body (or null on failure). */

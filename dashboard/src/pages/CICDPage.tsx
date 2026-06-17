@@ -2,7 +2,9 @@ import CICDTriggerCard from "../components/CICDTriggerCard";
 import JenkinsJobCard from "../components/JenkinsJobCard";
 import { config } from "../config";
 
-const CICD_JOB_URL = "https://jenkins-qa2.inca.infoblox.com/job/IB_QA_CI_NIOS_CVE_Analyser";
+const CICD_JOB_URL =
+  import.meta.env.VITE_JENKINS_JOB_CICD_URL ||
+  "https://jenkins-qa2.inca.infoblox.com/job/IB_QA_CI_NIOS_CVE_Analyser";
 
 export default function CICDPage() {
   return (
