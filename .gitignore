@@ -1,2 +1,9 @@
 .venv/
 .DS_Store
+
+# Environment files — never commit secrets. Only `.env.example` templates
+# (which contain placeholders only) are allowed in the repo.
+.env
+.env.local
+.env.*.local
+*.env.local
