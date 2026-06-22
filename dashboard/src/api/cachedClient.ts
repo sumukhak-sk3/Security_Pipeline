@@ -135,6 +135,21 @@ export async function fetchPipelineQuickUT(): Promise<[PipelineSlowLaunch | null
   return [launches[0] ?? null, launches[1] ?? null];
 }
 
+export interface BaselineResult {
+  quick: CachedRPLaunch & { branch: string };
+  slow: CachedRPLaunch & { branch: string };
+}
+
+/**
+ * Fetch the latest develop/9.2 baselines (most recent quick and slow launches).
+ */
+export async function fetchBaselineUT(): Promise<BaselineResult> {
+  const res = await fetch("/_api/rp/baseline", { signal: AbortSignal.timeout(10000) });
+  if (!res.ok) throw new Error(`Backend ${res.status}`);
+  const data = await res.json();
+  return { quick: data.quick, slow: data.slow };
+}
+
 /**
  * Convert a CachedJenkinsJob to the JenkinsJob type used by the frontend.
  */

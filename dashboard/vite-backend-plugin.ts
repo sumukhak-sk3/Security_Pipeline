@@ -1499,6 +1499,53 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
     return true;
   }
 
+  // GET /_api/rp/baseline — latest develop/9.2 quick & slow as baselines
+  if (path.startsWith("rp/baseline")) {
+    const cacheKey = "rp:baseline";
+    const cached = cacheGet(cacheKey);
+    if (cached) {
+      res.end(JSON.stringify({ ok: true, ...cached, fromCache: true }));
+      return true;
+    }
+
+    const headers: Record<string, string> = {};
+    if (cfg.rpToken) headers.Authorization = `Bearer ${cfg.rpToken}`;
+
+    async function fetchLatestLaunch(nameFilter: string): Promise<(RPLaunchCache & { branch: string }) | null> {
+      const launchesUrl = `${cfg.rpBaseUrl}/api/v1/${cfg.rpProject}/launch?page.size=1&page.page=1&page.sort=startTime,DESC&filter.cnt.name=${encodeURIComponent(nameFilter)}`;
+      const data = await serverFetch(launchesUrl, headers);
+      const launch = (data.content ?? [])[0];
+      if (!launch) return null;
+      const summary = await serverFetch(`${cfg.rpBaseUrl}/api/v1/${cfg.rpProject}/launch/${launch.id}`, headers);
+      const exec = summary.statistics?.executions ?? {};
+      return {
+        id: summary.id,
+        name: summary.name ?? "",
+        status: summary.status ?? "unknown",
+        total: exec.total ?? 0,
+        passed: exec.passed ?? 0,
+        failed: exec.failed ?? 0,
+        skipped: exec.skipped ?? 0,
+        startTime: summary.startTime,
+        endTime: summary.endTime,
+        url: `${cfg.rpBaseUrl}/ui/#/${cfg.rpProject}/launches/all/${summary.id}`,
+        branch: "develop/9.2",
+      };
+    }
+
+    Promise.all([
+      fetchLatestLaunch("develop_9.2_quick"),
+      fetchLatestLaunch("develop_9.2_slow"),
+    ]).then(([quick, slow]) => {
+      const result = { quick, slow };
+      cacheSet(cacheKey, result, cfg.rpCacheTtlMs * 5);
+      res.end(JSON.stringify({ ok: true, ...result }));
+    }).catch((err) => {
+      res.end(JSON.stringify({ ok: false, error: err.message }));
+    });
+    return true;
+  }
+
   // GET /_api/rp/previous?branch=...&type=slow|quick — fetch the second-most-recent launch for a type
   if (path.startsWith("rp/previous")) {
     const urlObj = new URL(url, "http://localhost");

@@ -223,12 +223,10 @@ export default function History() {
         jobStatuses["build-ut"] = groupStatus(buildUtJobs);
       }
 
-      // SBOM: check for b-sbom build; mark success for 2026-06-08 run
-      const sbomBuild = builds.find((b) => b.jobId === "b-sbom");
+      // SBOM: derived from e-nios-build success (SBOM is generated as part of the build)
+      const sbomBuild = builds.find((b) => b.jobId === "b-sbom") ?? builds.find((b) => b.jobId === "e-nios-build");
       if (sbomBuild) {
         jobStatuses["sbom"] = buildToStatus(sbomBuild);
-      } else if (key === "2026-06-08") {
-        jobStatuses["sbom"] = "success";
       } else {
         jobStatuses["sbom"] = "pending";
       }
