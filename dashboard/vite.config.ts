@@ -60,6 +60,10 @@ export default defineConfig(({ mode }) => {
   // set JENKINS_PROXY_TLS_INSECURE=1 in .env.local only when the upstream
   // uses a self-signed or otherwise untrusted cert.
   const proxySecure = env.JENKINS_PROXY_TLS_INSECURE !== "1";
+  // qa2 has its own toggle (defaults to insecure — its cert is currently expired)
+  const qa2ProxySecure = env.QA2_JENKINS_PROXY_TLS_INSECURE !== undefined
+    ? env.QA2_JENKINS_PROXY_TLS_INSECURE !== "1"
+    : false;
 
   // Boot log so missing tokens are obvious in the terminal.
   // eslint-disable-next-line no-console
@@ -119,7 +123,7 @@ export default defineConfig(({ mode }) => {
         "/_jenkins/qa2": {
           target: env.QA2_JENKINS_BASE_URL || "https://jenkins-qa2.inca.infoblox.com",
           changeOrigin: true,
-          secure: false,
+          secure: qa2ProxySecure,
           auth: qa2Auth,
           rewrite: (p) => p.replace(/^\/_jenkins\/qa2/, ""),
           configure: stripBasicChallenge,
