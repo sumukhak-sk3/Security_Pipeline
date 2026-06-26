@@ -117,7 +117,7 @@ export interface PipelineSlowLaunch extends CachedRPLaunch {
  */
 export async function fetchPipelineSlowUT(): Promise<[PipelineSlowLaunch | null, PipelineSlowLaunch | null]> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10000);
+  const timer = setTimeout(() => controller.abort(), 30000);
   try {
     const res = await fetch("/_api/rp/pipeline-slow", { signal: controller.signal });
     if (!res.ok) throw new Error(`Backend ${res.status}`);
@@ -135,7 +135,7 @@ export async function fetchPipelineSlowUT(): Promise<[PipelineSlowLaunch | null,
  */
 export async function fetchPipelineQuickUT(): Promise<[PipelineSlowLaunch | null, PipelineSlowLaunch | null]> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10000);
+  const timer = setTimeout(() => controller.abort(), 30000);
   try {
     const res = await fetch("/_api/rp/pipeline-quick", { signal: controller.signal });
     if (!res.ok) throw new Error(`Backend ${res.status}`);
@@ -157,7 +157,7 @@ export interface BaselineResult {
  */
 export async function fetchBaselineUT(): Promise<BaselineResult> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 10000);
+  const timer = setTimeout(() => controller.abort(), 30000);
   try {
     const res = await fetch("/_api/rp/baseline", { signal: controller.signal });
     if (!res.ok) throw new Error(`Backend ${res.status}`);

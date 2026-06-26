@@ -160,11 +160,11 @@ export default function Metrics() {
     }
 
     load();
-    // Retry once after 5s if still loading (handles stale HMR / server restart)
-    const retry = setTimeout(() => {
+    // Retry every 8s until data loads (handles stale HMR / server restart)
+    const retry = setInterval(() => {
       if (!cancelled) load();
-    }, 5000);
-    return () => { cancelled = true; clearTimeout(retry); };
+    }, 8000);
+    return () => { cancelled = true; clearInterval(retry); };
   }, []);
 
   const { quick, slow, currentBranch, loading, error } = data;
