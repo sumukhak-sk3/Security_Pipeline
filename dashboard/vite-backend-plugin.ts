@@ -743,6 +743,37 @@ async function fetchFailedItemsForLaunch(
   }
 }
 
+/** Fetch ALL test items (leaf-level STEP type) from a launch with their status. */
+async function fetchAllItemsForLaunch(
+  cfg: PluginConfig,
+  launchId: number,
+  headers: Record<string, string>,
+): Promise<Array<{ name: string; path: string; status: string }>> {
+  const allItems: Array<{ name: string; path: string; status: string }> = [];
+  let page = 1;
+  const PAGE_SIZE = 300;
+  const MAX_PAGES = 30; // safety cap: 9000 items max
+  try {
+    while (page <= MAX_PAGES) {
+      const data = await serverFetch(
+        `${cfg.rpBaseUrl}/api/v1/${cfg.rpProject}/item?filter.eq.launchId=${launchId}&filter.eq.type=STEP&page.size=${PAGE_SIZE}&page.page=${page}`,
+        headers,
+      );
+      const items = data.content ?? [];
+      for (const item of items) {
+        allItems.push({
+          name: item.name ?? "unknown",
+          path: (item.pathNames?.itemPaths ?? []).map((p: any) => p.name).join(" > "),
+          status: item.status ?? "UNKNOWN",
+        });
+      }
+      if (items.length < PAGE_SIZE) break;
+      page++;
+    }
+  } catch { /* best effort */ }
+  return allItems;
+}
+
 async function pollRPLaunches(cfg: PluginConfig, branchTag: string): Promise<{ quick: RPLaunchCache | null; slow: RPLaunchCache | null }> {
   const circuitKey = "rp:api";
 
@@ -1599,13 +1630,61 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
       const quickBaseline = baselineCache?.quick ?? null;
       const slowBaseline = baselineCache?.slow ?? null;
 
-      // Fetch failed test items for current launches
-      const quickFailedItems = quickCurrent && quickCurrent.failed > 0
-        ? await fetchFailedItemsForLaunch(cfg, quickCurrent.id, rpHeaders)
-        : [];
-      const slowFailedItems = slowCurrent && slowCurrent.failed > 0
-        ? await fetchFailedItemsForLaunch(cfg, slowCurrent.id, rpHeaders)
-        : [];
+      // Fetch ALL test items for both Quick and Slow to do test-level comparison
+      const [quickAllItems, slowAllItems, quickFailedItems, slowFailedItems] = await Promise.all([
+        quickCurrent ? fetchAllItemsForLaunch(cfg, quickCurrent.id, rpHeaders) : Promise.resolve([]),
+        slowCurrent ? fetchAllItemsForLaunch(cfg, slowCurrent.id, rpHeaders) : Promise.resolve([]),
+        quickCurrent && quickCurrent.failed > 0
+          ? fetchFailedItemsForLaunch(cfg, quickCurrent.id, rpHeaders) : Promise.resolve([]),
+        slowCurrent && slowCurrent.failed > 0
+          ? fetchFailedItemsForLaunch(cfg, slowCurrent.id, rpHeaders) : Promise.resolve([]),
+      ]);
+
+      // Build lookup maps by test name for comparison
+      const quickByName = new Map<string, { status: string; path: string }>();
+      for (const item of quickAllItems) quickByName.set(item.name, { status: item.status, path: item.path });
+      const slowByName = new Map<string, { status: string; path: string }>();
+      for (const item of slowAllItems) slowByName.set(item.name, { status: item.status, path: item.path });
+
+      // Compute delta for every unique test name
+      const allTestNames = new Set([...quickByName.keys(), ...slowByName.keys()]);
+      type DeltaRow = {
+        name: string;
+        path: string;
+        quickStatus: string;
+        slowStatus: string;
+        verdict: "MATCH" | "REGRESSION" | "IMPROVEMENT" | "ONLY_QUICK" | "ONLY_SLOW" | "DIFF";
+      };
+      const deltaRows: DeltaRow[] = [];
+      for (const name of allTestNames) {
+        const q = quickByName.get(name);
+        const s = slowByName.get(name);
+        let verdict: DeltaRow["verdict"];
+        if (!s) {
+          verdict = "ONLY_QUICK";
+        } else if (!q) {
+          verdict = "ONLY_SLOW";
+        } else if (q.status === s.status) {
+          verdict = "MATCH";
+        } else if (q.status === "PASSED" && s.status === "FAILED") {
+          verdict = "REGRESSION"; // passed in quick, failed in slow
+        } else if (q.status === "FAILED" && s.status === "PASSED") {
+          verdict = "IMPROVEMENT"; // failed in quick, passed in slow
+        } else {
+          verdict = "DIFF"; // other status difference (e.g. SKIPPED vs FAILED)
+        }
+        deltaRows.push({
+          name,
+          path: q?.path ?? s?.path ?? "",
+          quickStatus: q?.status ?? "—",
+          slowStatus: s?.status ?? "—",
+          verdict,
+        });
+      }
+
+      // Sort: regressions first, then improvements, diffs, only-X, then matches
+      const verdictOrder: Record<string, number> = { REGRESSION: 0, IMPROVEMENT: 1, DIFF: 2, ONLY_QUICK: 3, ONLY_SLOW: 4, MATCH: 5 };
+      deltaRows.sort((a, b) => (verdictOrder[a.verdict] ?? 9) - (verdictOrder[b.verdict] ?? 9));
 
       // Generate Excel
       const wb = new ExcelJS.Workbook();
@@ -1614,89 +1693,136 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
 
       const headerFill: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF4472C4" } };
       const headerFont: Partial<ExcelJS.Font> = { bold: true, color: { argb: "FFFFFFFF" } };
-      const subHeaderFill: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9E2F3" } };
+      const redFill: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFCE4EC" } };
+      const greenFill: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE8F5E9" } };
+      const yellowFill: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFF8E1" } };
 
-      // Collect all unique branches across quick + slow launches
-      const quickLaunches = quickCache?.launches ?? [];
-      const slowLaunches = slowCache?.launches ?? [];
-      const allBranches = [...new Set([
-        ...quickLaunches.map((l: any) => l.branch || l.name || "unknown"),
-        ...slowLaunches.map((l: any) => l.branch || l.name || "unknown"),
-      ])];
-
-      // Helper to find launch for a branch
-      const findLaunch = (launches: any[], branch: string) =>
-        launches.find((l: any) => (l.branch || l.name) === branch) ?? null;
-
-      // --- Summary sheet: rows = branches, columns = Quick UT / Slow UT ---
+      // ─── Sheet 1: Summary ───────────────────────────────────────────────
       const summary = wb.addWorksheet("Summary");
       summary.columns = [
-        { header: "Branch", key: "branch", width: 30 },
-        { header: "Quick UT - Total", key: "qTotal", width: 14 },
-        { header: "Quick UT - Passed", key: "qPassed", width: 14 },
-        { header: "Quick UT - Failed", key: "qFailed", width: 14 },
-        { header: "Quick UT - Skipped", key: "qSkipped", width: 14 },
-        { header: "Quick UT - Pass %", key: "qRate", width: 14 },
-        { header: "Slow UT - Total", key: "sTotal", width: 14 },
-        { header: "Slow UT - Passed", key: "sPassed", width: 14 },
-        { header: "Slow UT - Failed", key: "sFailed", width: 14 },
-        { header: "Slow UT - Skipped", key: "sSkipped", width: 14 },
-        { header: "Slow UT - Pass %", key: "sRate", width: 14 },
+        { header: "Metric", key: "metric", width: 22 },
+        { header: "Quick UT", key: "quick", width: 18 },
+        { header: "Slow UT", key: "slow", width: 18 },
+        { header: "Δ (Quick − Slow)", key: "delta", width: 18 },
+        { header: "Notes", key: "notes", width: 40 },
       ];
       summary.getRow(1).font = headerFont;
       summary.getRow(1).fill = headerFill;
 
-      for (const branch of allBranches) {
-        const q = findLaunch(quickLaunches, branch);
-        const s = findLaunch(slowLaunches, branch);
-        summary.addRow({
-          branch,
-          qTotal: q?.total ?? "—",
-          qPassed: q?.passed ?? "—",
-          qFailed: q?.failed ?? "—",
-          qSkipped: q?.skipped ?? "—",
-          qRate: q && q.total > 0 ? `${Math.round((q.passed / q.total) * 100)}%` : "—",
-          sTotal: s?.total ?? "—",
-          sPassed: s?.passed ?? "—",
-          sFailed: s?.failed ?? "—",
-          sSkipped: s?.skipped ?? "—",
-          sRate: s && s.total > 0 ? `${Math.round((s.passed / s.total) * 100)}%` : "—",
-        });
+      const qBranch = quickCurrent?.branch ?? quickCurrent?.name ?? "—";
+      const sBranch = slowCurrent?.branch ?? slowCurrent?.name ?? "—";
+      summary.addRow({ metric: "Branch", quick: qBranch, slow: sBranch, delta: "", notes: "" });
+      summary.addRow({ metric: "Launch ID", quick: quickCurrent?.id ?? "—", slow: slowCurrent?.id ?? "—", delta: "", notes: "" });
+      summary.addRow({ metric: "Status", quick: quickCurrent?.status ?? "—", slow: slowCurrent?.status ?? "—", delta: "", notes: "" });
+      summary.addRow({ metric: "", quick: "", slow: "", delta: "", notes: "" }); // spacer
+
+      const qTotal = quickCurrent?.total ?? 0;
+      const sTotal = slowCurrent?.total ?? 0;
+      const qPassed = quickCurrent?.passed ?? 0;
+      const sPassed = slowCurrent?.passed ?? 0;
+      const qFailed = quickCurrent?.failed ?? 0;
+      const sFailed = slowCurrent?.failed ?? 0;
+      const qSkipped = quickCurrent?.skipped ?? 0;
+      const sSkipped = slowCurrent?.skipped ?? 0;
+      const qRate = qTotal > 0 ? Math.round((qPassed / qTotal) * 100) : 0;
+      const sRate = sTotal > 0 ? Math.round((sPassed / sTotal) * 100) : 0;
+
+      summary.addRow({ metric: "Total Tests", quick: qTotal, slow: sTotal, delta: qTotal - sTotal, notes: "" });
+      summary.addRow({ metric: "Passed", quick: qPassed, slow: sPassed, delta: qPassed - sPassed, notes: "" });
+      summary.addRow({ metric: "Failed", quick: qFailed, slow: sFailed, delta: qFailed - sFailed, notes: qFailed > sFailed ? "⚠ Quick has more failures" : sFailed > qFailed ? "⚠ Slow has more failures" : "" });
+      summary.addRow({ metric: "Skipped", quick: qSkipped, slow: sSkipped, delta: qSkipped - sSkipped, notes: "" });
+      summary.addRow({ metric: "Pass Rate", quick: `${qRate}%`, slow: `${sRate}%`, delta: `${qRate - sRate}%`, notes: qRate < sRate ? "⚠ Quick pass rate lower" : sRate < qRate ? "⚠ Slow pass rate lower" : "✓ Same" });
+      summary.addRow({ metric: "", quick: "", slow: "", delta: "", notes: "" }); // spacer
+
+      // Delta summary counts
+      const regCount = deltaRows.filter(r => r.verdict === "REGRESSION").length;
+      const impCount = deltaRows.filter(r => r.verdict === "IMPROVEMENT").length;
+      const diffCount = deltaRows.filter(r => r.verdict === "DIFF").length;
+      const matchCount = deltaRows.filter(r => r.verdict === "MATCH").length;
+      const onlyQCount = deltaRows.filter(r => r.verdict === "ONLY_QUICK").length;
+      const onlySCount = deltaRows.filter(r => r.verdict === "ONLY_SLOW").length;
+
+      summary.addRow({ metric: "── Delta Analysis ──", quick: "", slow: "", delta: "", notes: "" });
+      summary.addRow({ metric: "Tests in Both", quick: "", slow: "", delta: matchCount + regCount + impCount + diffCount, notes: "" });
+      summary.addRow({ metric: "Matching (same result)", quick: "", slow: "", delta: matchCount, notes: "✓ Consistent" });
+      summary.addRow({ metric: "Regressions", quick: "", slow: "", delta: regCount, notes: regCount > 0 ? "⚠ PASSED in Quick → FAILED in Slow" : "✓ None" });
+      summary.addRow({ metric: "Improvements", quick: "", slow: "", delta: impCount, notes: impCount > 0 ? "FAILED in Quick → PASSED in Slow" : "" });
+      summary.addRow({ metric: "Other diffs", quick: "", slow: "", delta: diffCount, notes: "Different status (e.g. SKIPPED vs FAILED)" });
+      summary.addRow({ metric: "Only in Quick UT", quick: "", slow: "", delta: onlyQCount, notes: "" });
+      summary.addRow({ metric: "Only in Slow UT", quick: "", slow: "", delta: onlySCount, notes: "" });
+
+      // Baseline comparison (if available)
+      if (quickBaseline || slowBaseline) {
+        summary.addRow({ metric: "", quick: "", slow: "", delta: "", notes: "" });
+        summary.addRow({ metric: "── vs Baseline (develop/9.2) ──", quick: "", slow: "", delta: "", notes: "" });
+        if (quickBaseline) {
+          const bRate = quickBaseline.total > 0 ? Math.round((quickBaseline.passed / quickBaseline.total) * 100) : 0;
+          summary.addRow({ metric: "Quick Baseline Pass Rate", quick: `${qRate}%`, slow: `${bRate}%`, delta: `${qRate - bRate}%`, notes: qRate < bRate ? "⚠ Below baseline" : "✓ At or above baseline" });
+        }
+        if (slowBaseline) {
+          const bRate = slowBaseline.total > 0 ? Math.round((slowBaseline.passed / slowBaseline.total) * 100) : 0;
+          summary.addRow({ metric: "Slow Baseline Pass Rate", quick: `${sRate}%`, slow: `${bRate}%`, delta: `${sRate - bRate}%`, notes: sRate < bRate ? "⚠ Below baseline" : "✓ At or above baseline" });
+        }
       }
 
-      // --- Comparison sheet: Quick vs Slow side-by-side delta ---
-      const comparison = wb.addWorksheet("Comparison");
-      comparison.columns = [
-        { header: "Branch", key: "branch", width: 30 },
-        { header: "Quick UT - Total", key: "qTotal", width: 14 },
-        { header: "Slow UT - Total", key: "sTotal", width: 14 },
-        { header: "Quick UT - Failed", key: "qFailed", width: 14 },
-        { header: "Slow UT - Failed", key: "sFailed", width: 14 },
-        { header: "Quick UT - Pass %", key: "qRate", width: 14 },
-        { header: "Slow UT - Pass %", key: "sRate", width: 14 },
-        { header: "Δ Failed (Quick−Slow)", key: "deltaFailed", width: 20 },
+      // ─── Sheet 2: Regressions (key signal for review) ──────────────────
+      const regressions = wb.addWorksheet("Regressions");
+      regressions.columns = [
+        { header: "Test Name", key: "name", width: 55 },
+        { header: "Path", key: "path", width: 60 },
+        { header: "Quick UT Status", key: "quickStatus", width: 16 },
+        { header: "Slow UT Status", key: "slowStatus", width: 16 },
+        { header: "Verdict", key: "verdict", width: 16 },
       ];
-      comparison.getRow(1).font = headerFont;
-      comparison.getRow(1).fill = headerFill;
+      regressions.getRow(1).font = headerFont;
+      regressions.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFC62828" } };
 
-      for (const branch of allBranches) {
-        const q = findLaunch(quickLaunches, branch);
-        const s = findLaunch(slowLaunches, branch);
-        const qFailed = q?.failed ?? 0;
-        const sFailed = s?.failed ?? 0;
-        comparison.addRow({
-          branch,
-          qTotal: q?.total ?? 0,
-          sTotal: s?.total ?? 0,
-          qFailed,
-          sFailed,
-          qRate: q && q.total > 0 ? `${Math.round((q.passed / q.total) * 100)}%` : "—",
-          sRate: s && s.total > 0 ? `${Math.round((s.passed / s.total) * 100)}%` : "—",
-          deltaFailed: qFailed - sFailed,
-        });
+      const regAndImpRows = deltaRows.filter(r => r.verdict === "REGRESSION" || r.verdict === "IMPROVEMENT" || r.verdict === "DIFF");
+      if (regAndImpRows.length === 0) {
+        regressions.addRow({ name: "No regressions or differences found", path: "", quickStatus: "", slowStatus: "", verdict: "✓ All matching" });
+      } else {
+        for (const row of regAndImpRows) {
+          const r = regressions.addRow({
+            name: row.name,
+            path: row.path,
+            quickStatus: row.quickStatus,
+            slowStatus: row.slowStatus,
+            verdict: row.verdict,
+          });
+          if (row.verdict === "REGRESSION") r.fill = redFill;
+          else if (row.verdict === "IMPROVEMENT") r.fill = greenFill;
+          else r.fill = yellowFill;
+        }
       }
 
-      // --- Failed Tests sheet (detailed) ---
+      // ─── Sheet 3: Full Delta (all tests) ───────────────────────────────
+      if (deltaRows.length > 0) {
+        const delta = wb.addWorksheet("Full Delta");
+        delta.columns = [
+          { header: "Test Name", key: "name", width: 55 },
+          { header: "Path", key: "path", width: 50 },
+          { header: "Quick UT Status", key: "quickStatus", width: 16 },
+          { header: "Slow UT Status", key: "slowStatus", width: 16 },
+          { header: "Verdict", key: "verdict", width: 16 },
+        ];
+        delta.getRow(1).font = headerFont;
+        delta.getRow(1).fill = headerFill;
+
+        for (const row of deltaRows) {
+          const r = delta.addRow({
+            name: row.name,
+            path: row.path,
+            quickStatus: row.quickStatus,
+            slowStatus: row.slowStatus,
+            verdict: row.verdict,
+          });
+          if (row.verdict === "REGRESSION") r.fill = redFill;
+          else if (row.verdict === "IMPROVEMENT") r.fill = greenFill;
+          else if (row.verdict === "DIFF" || row.verdict === "ONLY_QUICK" || row.verdict === "ONLY_SLOW") r.fill = yellowFill;
+        }
+      }
+
+      // ─── Sheet 4: Failed Tests (error logs) ────────────────────────────
       if (quickFailedItems.length > 0 || slowFailedItems.length > 0) {
         const failures = wb.addWorksheet("Failed Tests");
         failures.columns = [
@@ -1710,20 +1836,10 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
         failures.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
 
         for (const item of quickFailedItems) {
-          failures.addRow({
-            type: "Quick",
-            name: item.name,
-            path: item.path ?? "",
-            log: item.sampleLogs?.[0]?.message ?? "",
-          });
+          failures.addRow({ type: "Quick", name: item.name, path: item.path ?? "", log: item.sampleLogs?.[0]?.message ?? "" });
         }
         for (const item of slowFailedItems) {
-          failures.addRow({
-            type: "Slow",
-            name: item.name,
-            path: item.path ?? "",
-            log: item.sampleLogs?.[0]?.message ?? "",
-          });
+          failures.addRow({ type: "Slow", name: item.name, path: item.path ?? "", log: item.sampleLogs?.[0]?.message ?? "" });
         }
       }
 
