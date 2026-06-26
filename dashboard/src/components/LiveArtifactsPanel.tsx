@@ -17,6 +17,7 @@ const MAX_ROWS = 100;
 
 function kindLabel(name: string): string {
   const lower = name.toLowerCase();
+  if (lower === "ut-comparison.xlsx") return "UT";
   if (lower.endsWith(".cdx.json") || lower.endsWith(".bom.json")) return "SBOM";
   if (lower.endsWith(".json") && lower.includes("sbom")) return "SBOM";
   if (lower.includes("cve") && (lower.endsWith(".json") || lower.endsWith(".csv"))) return "CVE LIST";
@@ -112,6 +113,16 @@ export default function LiveArtifactsPanel({
           });
         }
       }
+      // Inject the UT Comparison report as a synthetic artifact row
+      out.push({
+        jobId: "ut-comparison",
+        jobTitle: "Unit Tests",
+        buildNumber: null,
+        fileName: "ut-comparison.xlsx",
+        relativePath: "ut-comparison.xlsx",
+        downloadUrl: "/_api/rp/ut-comparison.xlsx",
+      });
+
       setRows(out);
     })();
     return () => { cancelled = true; };
@@ -149,7 +160,7 @@ export default function LiveArtifactsPanel({
                 </div>
               </div>
               <a
-                href={toProxyUrl(r.downloadUrl)}
+                href={r.jobId === "ut-comparison" ? r.downloadUrl : toProxyUrl(r.downloadUrl)}
                 download={r.fileName}
                 className="rounded border border-line px-2 py-1 text-[11px] text-ink-muted hover:bg-surface-2 hover:text-ink"
               >
@@ -243,3 +254,5 @@ function JiraUploadButton({ disabled }: { disabled: boolean }) {
     </div>
   );
 }
+
+

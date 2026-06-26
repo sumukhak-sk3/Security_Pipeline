@@ -116,11 +116,17 @@ export interface PipelineSlowLaunch extends CachedRPLaunch {
  * Returns [latest, previous] based on actual Jenkins Slow UT successful builds.
  */
 export async function fetchPipelineSlowUT(): Promise<[PipelineSlowLaunch | null, PipelineSlowLaunch | null]> {
-  const res = await fetch("/_api/rp/pipeline-slow", { signal: AbortSignal.timeout(10000) });
-  if (!res.ok) throw new Error(`Backend ${res.status}`);
-  const data = await res.json();
-  const launches: PipelineSlowLaunch[] = data.launches ?? [];
-  return [launches[0] ?? null, launches[1] ?? null];
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const res = await fetch("/_api/rp/pipeline-slow", { signal: controller.signal });
+    if (!res.ok) throw new Error(`Backend ${res.status}`);
+    const data = await res.json();
+    const launches: PipelineSlowLaunch[] = data.launches ?? [];
+    return [launches[0] ?? null, launches[1] ?? null];
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -128,11 +134,17 @@ export async function fetchPipelineSlowUT(): Promise<[PipelineSlowLaunch | null,
  * Returns [latest, previous] based on actual Jenkins Quick UT successful builds.
  */
 export async function fetchPipelineQuickUT(): Promise<[PipelineSlowLaunch | null, PipelineSlowLaunch | null]> {
-  const res = await fetch("/_api/rp/pipeline-quick", { signal: AbortSignal.timeout(10000) });
-  if (!res.ok) throw new Error(`Backend ${res.status}`);
-  const data = await res.json();
-  const launches: PipelineSlowLaunch[] = data.launches ?? [];
-  return [launches[0] ?? null, launches[1] ?? null];
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const res = await fetch("/_api/rp/pipeline-quick", { signal: controller.signal });
+    if (!res.ok) throw new Error(`Backend ${res.status}`);
+    const data = await res.json();
+    const launches: PipelineSlowLaunch[] = data.launches ?? [];
+    return [launches[0] ?? null, launches[1] ?? null];
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export interface BaselineResult {
@@ -144,10 +156,16 @@ export interface BaselineResult {
  * Fetch the latest develop/9.2 baselines (most recent quick and slow launches).
  */
 export async function fetchBaselineUT(): Promise<BaselineResult> {
-  const res = await fetch("/_api/rp/baseline", { signal: AbortSignal.timeout(10000) });
-  if (!res.ok) throw new Error(`Backend ${res.status}`);
-  const data = await res.json();
-  return { quick: data.quick, slow: data.slow };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const res = await fetch("/_api/rp/baseline", { signal: controller.signal });
+    if (!res.ok) throw new Error(`Backend ${res.status}`);
+    const data = await res.json();
+    return { quick: data.quick, slow: data.slow };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

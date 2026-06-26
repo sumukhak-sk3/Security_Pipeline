@@ -20,6 +20,7 @@ import { loadEnv } from "vite";
 import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage, ServerResponse } from "http";
 import { S3Client, ListObjectsV2Command } from "@aws-sdk/client-s3";
+import ExcelJS from "exceljs";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -705,6 +706,42 @@ async function pollS3Cve(cfg: PluginConfig): Promise<S3CveCache | null> {
 }
 
 // ─── ReportPortal poller ────────────────────────────────────────────────────
+
+/** Fetch failed test items for a given RP launch ID (used by xlsx export). */
+async function fetchFailedItemsForLaunch(
+  cfg: PluginConfig,
+  launchId: number,
+  headers: Record<string, string>,
+): Promise<Array<{ name: string; path: string; sampleLogs: Array<{ message: string }> }>> {
+  try {
+    const itemsData = await serverFetch(
+      `${cfg.rpBaseUrl}/api/v1/${cfg.rpProject}/item?filter.eq.launchId=${launchId}&filter.eq.status=FAILED&page.size=50&page.page=1`,
+      headers,
+    );
+    const items = itemsData.content ?? [];
+    return Promise.all(
+      items.slice(0, 50).map(async (item: any) => {
+        let logs: Array<{ message: string }> = [];
+        try {
+          const logData = await serverFetch(
+            `${cfg.rpBaseUrl}/api/v1/${cfg.rpProject}/log?filter.eq.itemRef=${item.id}&filter.in.level=ERROR,FATAL&page.size=3&page.sort=logTime,DESC`,
+            headers,
+          );
+          logs = (logData.content ?? []).map((l: any) => ({
+            message: l.message?.slice(0, 500) ?? "",
+          }));
+        } catch { /* best effort */ }
+        return {
+          name: item.name ?? "unknown",
+          path: (item.pathNames?.itemPaths ?? []).map((p: any) => p.name).join(" > "),
+          sampleLogs: logs,
+        };
+      }),
+    );
+  } catch {
+    return [];
+  }
+}
 
 async function pollRPLaunches(cfg: PluginConfig, branchTag: string): Promise<{ quick: RPLaunchCache | null; slow: RPLaunchCache | null }> {
   const circuitKey = "rp:api";
@@ -1543,6 +1580,163 @@ async function handleApiRequest(req: IncomingMessage, res: ServerResponse, cfg: 
     }).catch((err) => {
       res.end(JSON.stringify({ ok: false, error: err.message }));
     });
+    return true;
+  }
+
+  // GET /_api/rp/ut-comparison.xlsx — download UT comparison as Excel
+  if (path.startsWith("rp/ut-comparison.xlsx")) {
+    const rpHeaders: Record<string, string> = {};
+    if (cfg.rpToken) rpHeaders.Authorization = `Bearer ${cfg.rpToken}`;
+
+    try {
+      // Gather data from cache (same source as pipeline-quick, pipeline-slow, baseline endpoints)
+      const quickCache = cacheGet<{ launches: any[] }>("rp:pipeline-quick");
+      const slowCache = cacheGet<{ launches: any[] }>("rp:pipeline-slow");
+      const baselineCache = cacheGet<{ quick: any; slow: any }>("rp:baseline");
+
+      const quickCurrent = quickCache?.launches?.[0] ?? null;
+      const slowCurrent = slowCache?.launches?.[0] ?? null;
+      const quickBaseline = baselineCache?.quick ?? null;
+      const slowBaseline = baselineCache?.slow ?? null;
+
+      // Fetch failed test items for current launches
+      const quickFailedItems = quickCurrent && quickCurrent.failed > 0
+        ? await fetchFailedItemsForLaunch(cfg, quickCurrent.id, rpHeaders)
+        : [];
+      const slowFailedItems = slowCurrent && slowCurrent.failed > 0
+        ? await fetchFailedItemsForLaunch(cfg, slowCurrent.id, rpHeaders)
+        : [];
+
+      // Generate Excel
+      const wb = new ExcelJS.Workbook();
+      wb.creator = "Security Pipeline Dashboard";
+      wb.created = new Date();
+
+      const headerFill: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF4472C4" } };
+      const headerFont: Partial<ExcelJS.Font> = { bold: true, color: { argb: "FFFFFFFF" } };
+      const subHeaderFill: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9E2F3" } };
+
+      // Collect all unique branches across quick + slow launches
+      const quickLaunches = quickCache?.launches ?? [];
+      const slowLaunches = slowCache?.launches ?? [];
+      const allBranches = [...new Set([
+        ...quickLaunches.map((l: any) => l.branch || l.name || "unknown"),
+        ...slowLaunches.map((l: any) => l.branch || l.name || "unknown"),
+      ])];
+
+      // Helper to find launch for a branch
+      const findLaunch = (launches: any[], branch: string) =>
+        launches.find((l: any) => (l.branch || l.name) === branch) ?? null;
+
+      // --- Summary sheet: rows = branches, columns = Quick UT / Slow UT ---
+      const summary = wb.addWorksheet("Summary");
+      summary.columns = [
+        { header: "Branch", key: "branch", width: 30 },
+        { header: "Quick UT - Total", key: "qTotal", width: 14 },
+        { header: "Quick UT - Passed", key: "qPassed", width: 14 },
+        { header: "Quick UT - Failed", key: "qFailed", width: 14 },
+        { header: "Quick UT - Skipped", key: "qSkipped", width: 14 },
+        { header: "Quick UT - Pass %", key: "qRate", width: 14 },
+        { header: "Slow UT - Total", key: "sTotal", width: 14 },
+        { header: "Slow UT - Passed", key: "sPassed", width: 14 },
+        { header: "Slow UT - Failed", key: "sFailed", width: 14 },
+        { header: "Slow UT - Skipped", key: "sSkipped", width: 14 },
+        { header: "Slow UT - Pass %", key: "sRate", width: 14 },
+      ];
+      summary.getRow(1).font = headerFont;
+      summary.getRow(1).fill = headerFill;
+
+      for (const branch of allBranches) {
+        const q = findLaunch(quickLaunches, branch);
+        const s = findLaunch(slowLaunches, branch);
+        summary.addRow({
+          branch,
+          qTotal: q?.total ?? "—",
+          qPassed: q?.passed ?? "—",
+          qFailed: q?.failed ?? "—",
+          qSkipped: q?.skipped ?? "—",
+          qRate: q && q.total > 0 ? `${Math.round((q.passed / q.total) * 100)}%` : "—",
+          sTotal: s?.total ?? "—",
+          sPassed: s?.passed ?? "—",
+          sFailed: s?.failed ?? "—",
+          sSkipped: s?.skipped ?? "—",
+          sRate: s && s.total > 0 ? `${Math.round((s.passed / s.total) * 100)}%` : "—",
+        });
+      }
+
+      // --- Comparison sheet: Quick vs Slow side-by-side delta ---
+      const comparison = wb.addWorksheet("Comparison");
+      comparison.columns = [
+        { header: "Branch", key: "branch", width: 30 },
+        { header: "Quick UT - Total", key: "qTotal", width: 14 },
+        { header: "Slow UT - Total", key: "sTotal", width: 14 },
+        { header: "Quick UT - Failed", key: "qFailed", width: 14 },
+        { header: "Slow UT - Failed", key: "sFailed", width: 14 },
+        { header: "Quick UT - Pass %", key: "qRate", width: 14 },
+        { header: "Slow UT - Pass %", key: "sRate", width: 14 },
+        { header: "Δ Failed (Quick−Slow)", key: "deltaFailed", width: 20 },
+      ];
+      comparison.getRow(1).font = headerFont;
+      comparison.getRow(1).fill = headerFill;
+
+      for (const branch of allBranches) {
+        const q = findLaunch(quickLaunches, branch);
+        const s = findLaunch(slowLaunches, branch);
+        const qFailed = q?.failed ?? 0;
+        const sFailed = s?.failed ?? 0;
+        comparison.addRow({
+          branch,
+          qTotal: q?.total ?? 0,
+          sTotal: s?.total ?? 0,
+          qFailed,
+          sFailed,
+          qRate: q && q.total > 0 ? `${Math.round((q.passed / q.total) * 100)}%` : "—",
+          sRate: s && s.total > 0 ? `${Math.round((s.passed / s.total) * 100)}%` : "—",
+          deltaFailed: qFailed - sFailed,
+        });
+      }
+
+      // --- Failed Tests sheet (detailed) ---
+      if (quickFailedItems.length > 0 || slowFailedItems.length > 0) {
+        const failures = wb.addWorksheet("Failed Tests");
+        failures.columns = [
+          { header: "UT Type", key: "type", width: 12 },
+          { header: "Test Name", key: "name", width: 50 },
+          { header: "Path", key: "path", width: 60 },
+          { header: "Error Log (sample)", key: "log", width: 80 },
+        ];
+        failures.getRow(1).font = headerFont;
+        failures.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFF0000" } };
+        failures.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
+
+        for (const item of quickFailedItems) {
+          failures.addRow({
+            type: "Quick",
+            name: item.name,
+            path: item.path ?? "",
+            log: item.sampleLogs?.[0]?.message ?? "",
+          });
+        }
+        for (const item of slowFailedItems) {
+          failures.addRow({
+            type: "Slow",
+            name: item.name,
+            path: item.path ?? "",
+            log: item.sampleLogs?.[0]?.message ?? "",
+          });
+        }
+      }
+
+      // Write to buffer and send
+      const buffer = await wb.xlsx.writeBuffer();
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="ut-comparison-${new Date().toISOString().slice(0, 10)}.xlsx"`);
+      res.end(Buffer.from(buffer as ArrayBuffer));
+    } catch (err: any) {
+      res.setHeader("Content-Type", "application/json");
+      res.statusCode = 500;
+      res.end(JSON.stringify({ ok: false, error: err.message }));
+    }
     return true;
   }
 

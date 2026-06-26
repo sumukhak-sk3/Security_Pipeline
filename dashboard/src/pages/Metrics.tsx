@@ -132,12 +132,15 @@ export default function Metrics() {
 
     async function load() {
       try {
-        // Fetch the latest pipeline-triggered Quick and Slow UT builds
-        const [latestQuick] = await fetchPipelineQuickUT();
-        const [latestSlow] = await fetchPipelineSlowUT();
+        // Fetch all three in parallel to avoid sequential timeout stacking
+        const [quickResult, slowResult, baseline] = await Promise.all([
+          fetchPipelineQuickUT(),
+          fetchPipelineSlowUT(),
+          fetchBaselineUT(),
+        ]);
 
-        // Fetch the fixed develop/9.2 baselines (quick=838, slow=837)
-        const baseline = await fetchBaselineUT();
+        const [latestQuick] = quickResult;
+        const [latestSlow] = slowResult;
 
         const currentBranch = (latestQuick as PipelineSlowLaunch | null)?.branch ?? 
                               (latestSlow as PipelineSlowLaunch | null)?.branch ?? "";
@@ -157,7 +160,11 @@ export default function Metrics() {
     }
 
     load();
-    return () => { cancelled = true; };
+    // Retry once after 5s if still loading (handles stale HMR / server restart)
+    const retry = setTimeout(() => {
+      if (!cancelled) load();
+    }, 5000);
+    return () => { cancelled = true; clearTimeout(retry); };
   }, []);
 
   const { quick, slow, currentBranch, loading, error } = data;
